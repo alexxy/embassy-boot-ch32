@@ -1,5 +1,7 @@
 # embassy-boot-ch32
 
+[![crates.io](https://img.shields.io/crates/v/embassy-boot-ch32.svg)](https://crates.io/crates/embassy-boot-ch32)
+[![docs.rs](https://img.shields.io/docs.rs/embassy-boot-ch32/latest)](https://docs.rs/embassy-boot-ch32)
 [![CI](https://github.com/alexxy/embassy-boot-ch32/actions/workflows/ci.yml/badge.svg)](https://github.com/alexxy/embassy-boot-ch32/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE-MIT)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE-APACHE)
@@ -9,6 +11,10 @@ microcontrollers driven by
 [`ch32-hal`](https://github.com/ch32-rs/ch32-hal). Tested on the **CH32V305RBT6**
 (QingKe V4 core, 128 KiB flash / 32 KiB RAM); the adapter crate itself is not
 V305 specific as long as the chip uses the `ch32-hal` flash driver.
+
+```sh
+cargo add embassy-boot-ch32 --features log
+```
 
 The examples target the
 [`nanoCH32V305`](https://github.com/wuxx/nanoCH32V305) board: its status LED is
@@ -292,8 +298,8 @@ A few things worth knowing:
   `rust-toolchain.toml` if that bothers you.
 
 The badges above (and the workflow itself) start working with the first push to
-GitHub. The crate is not published yet, so there are no crates.io/docs.rs
-badges.
+GitHub. The docs.rs badge turns green once docs.rs has built the published
+version.
 
 ## License
 
