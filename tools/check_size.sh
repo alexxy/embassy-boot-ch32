@@ -4,7 +4,12 @@
 # writes a raw binary image next to it.
 #
 # The LLVM tools come from the active rustup toolchain (`llvm-tools` component);
-# set LLVM_SIZE / LLVM_READELF / LLVM_OBJCOPY to use some other build.
+# set LLVM_SIZE / LLVM_READELF / LLVM_READOBJ / LLVM_OBJDUMP / LLVM_OBJCOPY to
+# use some other build.
+#
+# The entry point is read with whichever of `llvm-readelf`, `llvm-readobj` or
+# `llvm-objdump` is available: the rustup `llvm-tools` component ships the last
+# two but *not* `llvm-readelf`, so the readelf path alone cannot work in CI.
 #
 # Intended to be used from CI (it emits `::error::` annotations and appends a
 # row to $GITHUB_STEP_SUMMARY) but it is a plain script, so it also runs fine
@@ -67,14 +72,32 @@ llvm_bindir() {
 bindir="$(llvm_bindir)"
 LLVM_SIZE="${LLVM_SIZE:-$bindir/llvm-size}"
 LLVM_READELF="${LLVM_READELF:-$bindir/llvm-readelf}"
+LLVM_READOBJ="${LLVM_READOBJ:-$bindir/llvm-readobj}"
+LLVM_OBJDUMP="${LLVM_OBJDUMP:-$bindir/llvm-objdump}"
 LLVM_OBJCOPY="${LLVM_OBJCOPY:-$bindir/llvm-objcopy}"
 
-for tool in "$LLVM_SIZE" "$LLVM_READELF" "$LLVM_OBJCOPY"; do
+for tool in "$LLVM_SIZE" "$LLVM_OBJCOPY"; do
     if [ ! -x "$tool" ]; then
         echo "::error::$tool not found; run 'rustup component add llvm-tools'" >&2
         exit 1
     fi
 done
+
+# Prints the ELF entry point as bare hex (no 0x), or nothing when no ELF reader
+# is available or the output cannot be parsed.
+elf_entry_point() {
+    if [ -x "$LLVM_READELF" ]; then
+        "$LLVM_READELF" -h "$elf" |
+            sed -n 's/.*Entry point address:[[:space:]]*0x\([0-9a-fA-F]*\).*/\1/p'
+    elif [ -x "$LLVM_READOBJ" ]; then
+        "$LLVM_READOBJ" --file-headers "$elf" |
+            sed -n 's/.*Entry:[[:space:]]*0x\([0-9a-fA-F]*\).*/\1/p'
+    elif [ -x "$LLVM_OBJDUMP" ]; then
+        # llvm-objdump spells it "start address", not "Entry".
+        "$LLVM_OBJDUMP" -f "$elf" |
+            sed -n 's/.*start address:[[:space:]]*0x\([0-9a-fA-F]*\).*/\1/p'
+    fi
+}
 
 # Berkeley format: "text data bss dec hex filename". `text` covers everything
 # allocated in flash except the initialized data (`.data`), so the footprint a
@@ -98,10 +121,9 @@ else
 fi
 
 if [ -n "$entry" ]; then
-    actual="$("$LLVM_READELF" -h "$elf" |
-        sed -n 's/.*Entry point address:[[:space:]]*0x\([0-9a-fA-F]*\).*/\1/p')"
+    actual="$(elf_entry_point)"
     if [ -z "$actual" ]; then
-        echo "::error::$partition: could not read the entry point of $elf" >&2
+        echo "::error::$partition: could not read the entry point of $elf (tried llvm-readelf, llvm-readobj and llvm-objdump)" >&2
         status=1
     elif [ "$((16#$actual))" -ne "$((16#${entry#0x}))" ]; then
         # A wrong entry point almost always means memory.x was not picked up.
