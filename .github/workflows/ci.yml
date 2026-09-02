@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push makes the run for the previous one pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The adapter crate itself is plain `no_std` library code, so it can be built,
+  # linted and documented on the host for both toolchains.
+  #
+  # NOTE: `--all-features` is deliberately never used here: `embassy-boot`
+  # `compile_error!`s when `defmt` and `log` are enabled together, so the two
+  # logging back ends have to be checked as separate permutations.
+  host:
+    name: crate (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `nightly` is only here to catch new lints early; if it goes red because
+        # of clippy churn, pin a working nightly in a `rust-toolchain.toml`.
+        rust: [stable, nightly]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Clippy (log)
+        run: cargo clippy --all-targets --locked --features log -- -D warnings
+
+      - name: Clippy (defmt)
+        run: cargo clippy --all-targets --locked --features defmt -- -D warnings
+
+      # Cargo cannot say "these two features are exclusive", `build.rs` does, so
+      # assert that it keeps doing so.
+      - name: log and defmt are mutually exclusive
+        if: matrix.rust == 'stable'
+        run: |
+          set +e
+          output="$(cargo check --locked --all-features 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -eq 0 ]; then
+            echo '::error::cargo check --all-features succeeded; the log/defmt exclusion in build.rs is broken' >&2
+            exit 1
+          fi
+          case "$output" in
+            *'mutually exclusive'*) ;;
+            *)
+              echo '::error::cargo check --all-features failed, but not with the feature exclusion message' >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked --lib
+
+  # The examples are separate workspaces built for
+  # `riscv32imfc-unknown-none-elf` with `build-std`, i.e. nightly only. Each of
+  # them also has to fit into its partition of the shared partition map.
+  examples:
+    name: ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: bootloader
+            binary: bootloader-ch32v305
+            partition: BOOTLOADER
+            limit: 16384
+            entry: "0x08000000"
+          - example: application
+            binary: application-ch32v305
+            partition: ACTIVE
+            limit: 49152
+            entry: "0x08004000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # `rust-src` is needed by `build-std = ["core"]`, the custom target
+          # spec does the rest.
+          components: rust-src, rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/${{ matrix.example }} -> target
+          key: ${{ matrix.example }}
+
+      - name: Format
+        working-directory: examples/${{ matrix.example }}
+        run: cargo fmt --all -- --check
+
+      # `--locked` keeps the git dependency on `ch32-hal` pinned to the revision
+      # in the example's `Cargo.lock`, so a new upstream commit cannot break CI.
+      - name: Clippy
+        working-directory: examples/${{ matrix.example }}
+        run: cargo clippy --release --locked -- -D warnings
+
+      - name: Build
+        working-directory: examples/${{ matrix.example }}
+        run: cargo build --release --locked
+
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools || rustup component add llvm-tools-preview
+
+      - name: Partition size check
+        working-directory: examples/${{ matrix.example }}
+        env:
+          example: ${{ matrix.example }}
+        run: |
+          bash ../../tools/check_size.sh \
+            --elf target/riscv32imfc-unknown-none-elf/release/${{ matrix.binary }} \
+            --partition ${{ matrix.partition }} \
+            --limit ${{ matrix.limit }} \
+            --entry ${{ matrix.entry }} \
+            --bin ${{ matrix.binary }}.bin
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: |
+            examples/${{ matrix.example }}/target/riscv32imfc-unknown-none-elf/release/${{ matrix.binary }}
+            examples/${{ matrix.example }}/${{ matrix.binary }}.bin
+          if-no-files-found: error
