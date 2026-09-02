@@ -1,0 +1,35 @@
+[workspace]
+
+[package]
+name = "bootloader-ch32v305"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "embassy-boot bootloader for CH32V305RBT6"
+
+[[bin]]
+name = "bootloader-ch32v305"
+harness = false
+
+[dependencies]
+ch32-hal = { git = "https://github.com/ch32-rs/ch32-hal.git", default-features = false, features = [
+    "ch32v305rbt6",
+    "rt",
+    # `ch32-hal` does not compile without this feature today (its usb modules use
+    # `embassy-time` unconditionally). No embassy executor or time driver is used
+    # here, the bootloader is plain blocking code.
+    "embassy",
+] }
+embassy-boot-ch32 = { path = "../.." }
+embassy-sync = "0.8.0"
+qingke-rt = "0.7"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = "z"
+overflow-checks = false
+strip = false

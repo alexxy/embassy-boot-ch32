@@ -1,0 +1,508 @@
+//! `embassy-boot` bootloader for the WCH CH32V305RBT6.
+//!
+//! This is a fully blocking (no RTOS) bootloader:
+//!
+//! * it performs any pending active/dfu swap,
+//! * it offers a small serial console on USART1 (115200 8N1, PA9 TX / PA10 RX),
+//! * it can receive a raw application image over that console and mark it for
+//!   the next boot,
+//! * and finally it jumps to the active partition.
+//!
+//! Console commands (send a line, CR or LF terminated):
+//!
+//! ```text
+//! b / Enter   boot the active partition
+//! i           print partition map and bootloader state
+//! d           enter an update session
+//! ? / h       help
+//! ```
+//!
+//! Within 3 seconds after reset any key holds the board in the bootloader.
+//! Without a key press the active partition is booted immediately.
+//!
+//! # Update protocol
+//!
+//! In an update session the host first sends a header line with the length of
+//! the image in hexadecimal, then the raw image bytes:
+//!
+//! ```text
+//! f a800
+//! <43008 raw bytes>
+//! ```
+//!
+//! The bootloader acknowledges every 256 byte chunk with a `.` after it has
+//! been written to flash, and the host **must** wait for that acknowledgment
+//! before sending the next chunk: the USART has no FIFO, so a host that keeps
+//! streaming while the flash is busy programming will overrun it.
+//!
+//! After the last chunk the image is marked updated, the session ends, the
+//! bootloader swaps the image into the active partition and boots it. The new
+//! application is only considered good once it calls `mark_booted()`; until
+//! then the bootloader reverts to the previous image on every reset, so a
+//! broken image cannot brick the board.
+
+#![no_std]
+#![no_main]
+
+use core::cell::RefCell;
+use core::fmt::Write;
+
+use ch32_hal::delay::Delay;
+// `ch32_hal::flash::Blocking` and `ch32_hal::mode::Blocking` are two distinct
+// types; the flash one is aliased so the UART halves can use the plain mode
+// marker.
+use ch32_hal::flash::{Blocking as FlashBlocking, Flash};
+use ch32_hal::mode::Blocking;
+use ch32_hal::usart::{self, Instance, Uart, UartRx, UartTx};
+use embassy_boot_ch32::{
+    AlignedBuffer, BlockingFirmwareUpdater, BootLoader, BootLoaderConfig, CoarseFlash, FLASH_BASE,
+    FirmwareUpdaterConfig, State, active_size, active_start, dfu_size, dfu_start, state_size,
+    state_start,
+};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+
+/// Erase granularity presented to embassy-boot.
+///
+/// Must be a multiple of the hardware page size (256) and must divide the
+/// active, dfu and state partitions evenly. Bigger values shrink the state
+/// partition requirement, see [`embassy_boot_ch32::CoarseFlash`].
+const COARSE_ERASE_SIZE: usize = 8192;
+
+/// Buffer used by the swap algorithm. Must divide the page size and be a
+/// multiple of the write size (256).
+const COPY_BUFFER_SIZE: usize = 1024;
+
+/// The firmware updater insists on a scratch buffer of exactly
+/// `STATE::WRITE_SIZE` bytes. It doubles as the flash write chunk size.
+const STATE_BUFFER_SIZE: usize = 256;
+
+/// How long a key press is accepted before the active partition is booted.
+const BOOT_GRACE_MS: u32 = 3_000;
+/// Timeout while waiting for a console command line.
+const LINE_TIMEOUT_MS: u32 = 60_000;
+/// Timeout between two bytes of an incoming image.
+const CHUNK_TIMEOUT_MS: u32 = 10_000;
+
+/// The single flash driver, wrapped so that embassy-boot sees a coarser erase
+/// granularity than the 256 byte hardware pages.
+type BootFlash = CoarseFlash<Flash<'static, FlashBlocking>, COARSE_ERASE_SIZE>;
+
+/// All three partitions are views into this one device, so they share it
+/// through a [`Mutex`]/[`RefCell`], exactly as `from_linkerfile_blocking()`
+/// expects.
+type FlashMutex = Mutex<NoopRawMutex, RefCell<BootFlash>>;
+
+/// Prints to the console, ignoring the serial error (there is nothing useful to
+/// do about a dead console from inside the bootloader).
+macro_rules! cprint {
+    ($console:expr, $($arg:tt)*) => {{
+        let _ = core::write!(&mut $console.tx, $($arg)*);
+    }};
+}
+
+/// Prints a line to the console.
+macro_rules! cline {
+    ($console:expr, $($arg:tt)*) => {{
+        let _ = core::writeln!(&mut $console.tx, $($arg)*);
+    }};
+}
+
+/// A serial console made of the two halves of a split UART.
+///
+/// `ch32_hal::usart::Uart` only exposes `nb_read` to its crate, so the driver is
+/// split and the non blocking read is taken from the `UartRx` half.
+struct Console<'d, T: Instance> {
+    tx: UartTx<'d, T, Blocking>,
+    rx: UartRx<'d, T, Blocking>,
+}
+
+impl<'d, T: Instance> Console<'d, T> {
+    fn write(&mut self, s: &str) {
+        let _ = self.tx.write_str(s);
+    }
+
+    fn line(&mut self, s: &str) {
+        let _ = self.tx.write_str(s);
+        let _ = self.tx.write_str("\r\n");
+    }
+
+    fn echo(&mut self, b: u8) {
+        let _ = self.tx.blocking_write(&[b]);
+    }
+
+    /// One received byte, or `None` if nothing is available right now.
+    ///
+    /// `nb_read` clears framing/noise/overrun flags by itself, so an error is
+    /// treated the same way as an empty receiver.
+    fn read_byte(&mut self) -> Option<u8> {
+        self.rx.nb_read().ok()
+    }
+}
+
+/// USART1 data register, used to report a panic on the console.
+///
+/// The console driver itself cannot be used from the panic path (it is not a
+/// global and `core::fmt` formatting would pull in several kilobytes of unicode
+/// and escaping tables), so the register is poked directly. The TX flag is
+/// polled with a bounded number of iterations so that a panic before the UART is
+/// enabled cannot wedge the board even harder than it already is.
+const USART1_BASE: usize = 0x4001_3800;
+/// `STATR` (offset 0x00): transmit data register empty.
+const USART1_STAT: *const u32 = USART1_BASE as *const u32;
+/// `DATAR` (offset 0x04).
+const USART1_DATA: *mut u32 = (USART1_BASE + 0x04) as *mut u32;
+const USART_TX_EMPTY: u32 = 1 << 7;
+
+fn panic_puts(s: &str) {
+    for &byte in s.as_bytes() {
+        let mut spins = 0u32;
+        while unsafe { core::ptr::read_volatile(USART1_STAT) } & USART_TX_EMPTY == 0 {
+            spins += 1;
+            if spins > 100_000 {
+                return;
+            }
+        }
+        unsafe { core::ptr::write_volatile(USART1_DATA, byte as u32) };
+    }
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    // The panic message and location are deliberately left out: formatting them
+    // costs more flash than a 16 KiB bootloader can spare. Reproduce with a
+    // debugger and `panic_immediate_abort` disabled to get the details.
+    panic_puts("\r\nbootloader panic\r\n");
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[ch32_hal::entry]
+fn main() -> ! {
+    ch32_hal::debug::SDIPrint::enable();
+
+    let p = ch32_hal::init(Default::default());
+
+    let mut config = usart::Config::default();
+    config.baudrate = 115200;
+    // Note the argument order: the rx pin (PA10) comes first.
+    let uart = Uart::new_blocking(p.USART1, p.PA10, p.PA9, config).expect("USART1 config");
+    let (tx, rx) = uart.split();
+
+    let mut console = Console { tx, rx };
+    let mut delay = Delay;
+
+    let flash = FlashMutex::new(RefCell::new(CoarseFlash(Flash::new_blocking(p.FLASH))));
+
+    loop {
+        // `prepare` performs a pending swap/revert; it borrows the flash device
+        // only for as long as the config lives.
+        let boot_config = BootLoaderConfig::from_linkerfile_blocking(&flash, &flash, &flash);
+        let loader = match BootLoader::try_prepare::<_, _, _, COPY_BUFFER_SIZE>(boot_config) {
+            Ok(loader) => loader,
+            Err(e) => {
+                cline!(&mut console, "boot prepare failed: {e:?}");
+                cline!(&mut console, "entering update session");
+                update_session(&flash, &mut console, &mut delay);
+                continue;
+            }
+        };
+
+        cline!(&mut console, "boot state: {:?}", loader.state);
+
+        // The application asked to stay in the bootloader to receive an image.
+        if matches!(loader.state, State::DfuDetach) {
+            update_session(&flash, &mut console, &mut delay);
+            continue;
+        }
+
+        console.write(
+            "\r\nCH32V305 bootloader - press a key: [b] boot  [d] update  [i] info  [?] help\r\n",
+        );
+
+        let mut key = None;
+        let mut waited = 0;
+        while waited < BOOT_GRACE_MS {
+            if let Some(b) = console.read_byte() {
+                key = Some(b);
+                break;
+            }
+            delay.delay_ms(1);
+            waited += 1;
+        }
+
+        if let Some(b) = key {
+            console.echo(b);
+            console.write("\r\n");
+            console_loop(&flash, &mut console, &mut delay, Some(b));
+        }
+
+        console.line("booting active partition");
+        // SAFETY: the active partition is expected to hold the application built
+        // from `examples/application`, linked at the same partition map.
+        unsafe { loader.load(active_start()) }
+    }
+}
+
+/// Interactive console. Returns when the user asks to boot.
+fn console_loop<T: Instance>(
+    flash: &FlashMutex,
+    console: &mut Console<'_, T>,
+    delay: &mut Delay,
+    first: Option<u8>,
+) {
+    let mut first = first;
+
+    loop {
+        let key = match first.take() {
+            Some(b) => b,
+            None => {
+                console.write("boot> ");
+                loop {
+                    if let Some(b) = console.read_byte() {
+                        console.echo(b);
+                        console.write("\r\n");
+                        break b;
+                    }
+                    delay.delay_ms(1);
+                }
+            }
+        };
+
+        match key.to_ascii_lowercase() {
+            b'b' => return,
+            b'i' => print_info(console),
+            b'd' | b'u' => update_session(flash, console, delay),
+            _ => usage(console),
+        }
+    }
+}
+
+fn usage<T: Instance>(console: &mut Console<'_, T>) {
+    console.line("b / Enter  boot the active partition");
+    console.line("i          print partition map and state");
+    console.line("d          receive a firmware image");
+}
+
+fn print_info<T: Instance>(console: &mut Console<'_, T>) {
+    cline!(
+        console,
+        "active: 0x{:08x} +{} bytes",
+        FLASH_BASE + active_start(),
+        active_size()
+    );
+    cline!(
+        console,
+        "dfu:    0x{:08x} +{} bytes",
+        FLASH_BASE + dfu_start(),
+        dfu_size()
+    );
+    cline!(
+        console,
+        "state:  0x{:08x} +{} bytes",
+        FLASH_BASE + state_start(),
+        state_size()
+    );
+    cline!(
+        console,
+        "erase/page {} bytes, copy buffer {} bytes",
+        COARSE_ERASE_SIZE,
+        COPY_BUFFER_SIZE
+    );
+}
+
+/// Receives one image and marks it for the next boot.
+fn update_session<T: Instance>(
+    flash: &FlashMutex,
+    console: &mut Console<'_, T>,
+    delay: &mut Delay,
+) {
+    let mut aligned = AlignedBuffer([0u8; STATE_BUFFER_SIZE]);
+    let config = FirmwareUpdaterConfig::from_linkerfile_blocking(flash, flash);
+    let mut updater = BlockingFirmwareUpdater::new(config, aligned.as_mut());
+
+    match updater.get_state() {
+        Ok(state) => cline!(console, "state: {state:?}"),
+        Err(e) => {
+            cline!(console, "failed to read state: {e:?}");
+            return;
+        }
+    }
+
+    cline!(
+        console,
+        "send 'f <hex length>' (max {len:x}), then the image; wait for '.' after every {STATE_BUFFER_SIZE} byte chunk",
+        len = dfu_size()
+    );
+
+    let mut line = [0u8; 32];
+    let len = match read_line(console, delay, LINE_TIMEOUT_MS, &mut line) {
+        None => {
+            console.line("timeout waiting for header");
+            return;
+        }
+        Some(n) => {
+            let args = trim(&line[..n]);
+            if args.is_empty() || (args[0] | 0x20) != b'f' {
+                console.line("expected 'f <hex length>'");
+                return;
+            }
+            match parse_hex(trim(&args[1..])) {
+                Some(len) if len > 0 && len <= dfu_size() as usize => len,
+                _ => {
+                    console.line("bad length (empty, unparsable or larger than the dfu partition)");
+                    return;
+                }
+            }
+        }
+    };
+
+    cline!(console, "receiving {} bytes", len);
+
+    // Erased flash reads as 0xFF, so padding the tail of the last chunk keeps
+    // the dfu partition consistent with what a fresh erase would look like.
+    let mut chunk = [0xFFu8; STATE_BUFFER_SIZE];
+    let mut written = 0usize;
+
+    while written < len {
+        let want = core::cmp::min(STATE_BUFFER_SIZE, len - written);
+        if !read_exact(console, delay, &mut chunk[..want]) {
+            console.line("\r\ntimeout waiting for data, update aborted");
+            return;
+        }
+        // The flash driver only accepts whole 256 byte writes, so the tail of
+        // the last chunk is padded. Do it here rather than relying on the
+        // initial value of `chunk`, which still holds the previous chunk.
+        chunk[want..].fill(0xFF);
+
+        if let Err(e) = updater.write_firmware(written, &chunk) {
+            cline!(console, "\r\nflash write failed at {}: {e:?}", written);
+            return;
+        }
+
+        written += want;
+        if written == len || written.is_multiple_of(COARSE_ERASE_SIZE * 2) {
+            cline!(console, "\r\n{} / {} bytes", written, len);
+        } else {
+            cprint!(console, ".");
+        }
+    }
+
+    match updater.mark_updated() {
+        Ok(()) => console.line("\r\nimage marked updated, swapping"),
+        Err(e) => cline!(console, "\r\nfailed to mark updated: {e:?}"),
+    }
+}
+
+/// Reads exactly `buf.len()` bytes, giving up after `CHUNK_TIMEOUT_MS` between
+/// two bytes. Returns `false` on timeout.
+fn read_exact<T: Instance>(
+    console: &mut Console<'_, T>,
+    delay: &mut Delay,
+    buf: &mut [u8],
+) -> bool {
+    let mut done = 0;
+    let mut waited = 0;
+
+    while done < buf.len() {
+        if let Some(b) = console.read_byte() {
+            buf[done] = b;
+            done += 1;
+            waited = 0;
+        } else {
+            if waited >= CHUNK_TIMEOUT_MS {
+                return false;
+            }
+            delay.delay_ms(1);
+            waited += 1;
+        }
+    }
+
+    true
+}
+
+/// Reads a CR/LF terminated line into `buf`, echoing what comes in.
+///
+/// `timeout_ms` is an inter-byte timeout; empty lines are not returned.
+fn read_line<T: Instance>(
+    console: &mut Console<'_, T>,
+    delay: &mut Delay,
+    timeout_ms: u32,
+    buf: &mut [u8],
+) -> Option<usize> {
+    let mut len = 0;
+    let mut waited = 0;
+
+    loop {
+        let byte = match console.read_byte() {
+            Some(b) => {
+                waited = 0;
+                b
+            }
+            None => {
+                if waited >= timeout_ms {
+                    return None;
+                }
+                delay.delay_ms(1);
+                waited += 1;
+                continue;
+            }
+        };
+
+        match byte {
+            b'\r' | b'\n' => {
+                console.write("\r\n");
+                if len > 0 {
+                    return Some(len);
+                }
+            }
+            0x08 | 0x7F => {
+                if len > 0 {
+                    len -= 1;
+                    console.write("\u{8} \u{8}");
+                }
+            }
+            0x20..=0x7E => {
+                if len < buf.len() {
+                    buf[len] = byte;
+                    len += 1;
+                }
+                console.echo(byte);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn trim(mut bytes: &[u8]) -> &[u8] {
+    while let Some((first, rest)) = bytes.split_first() {
+        if first.is_ascii_whitespace() {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((last, rest)) = bytes.split_last() {
+        if last.is_ascii_whitespace() {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn parse_hex(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let mut value: usize = 0;
+    for &byte in bytes {
+        let digit = (byte as char).to_digit(16)?;
+        value = value.checked_mul(16)?.checked_add(digit as usize)?;
+    }
+
+    Some(value)
+}

@@ -1,0 +1,199 @@
+//! Example application for the CH32V305RBT6 `embassy-boot` example.
+//!
+//! This binary is linked into the `ACTIVE` partition (see
+//! `../../partition-map/ch32v305rbt6.x`) and is booted by the bootloader in
+//! `examples/bootloader`. It shows the two things an application has to do to
+//! take part in the update protocol:
+//!
+//! * call [`embassy_boot_ch32::BlockingFirmwareUpdater::mark_booted()`] once the
+//!   new image has proven itself, otherwise the bootloader reverts it on the
+//!   next reset,
+//! * optionally call
+//!   [`embassy_boot_ch32::BlockingFirmwareUpdater::mark_dfu()`] and reset to ask
+//!   the bootloader to stay in its update session.
+//!
+//! Besides that it is a plain embassy application: a blinking LED on PA3 (active
+//! low on the nanoCH32V305) and a small console on USART1 (115200 8N1, PA9 TX /
+//! PA10 RX):
+//!
+//! ```text
+//! i   print partition map and boot state
+//! d   mark the state partition for dfu and reset into the bootloader
+//! ```
+
+#![no_std]
+#![no_main]
+
+use core::cell::RefCell;
+use core::fmt::Write;
+
+use ch32_hal::Peri;
+use ch32_hal::flash::{Blocking as FlashBlocking, Flash};
+use ch32_hal::gpio::{AnyPin, Level, Output};
+use ch32_hal::mode::Blocking;
+use ch32_hal::usart::{Config, Instance, Uart, UartTx};
+use embassy_boot_ch32::{
+    AlignedBuffer, BlockingFirmwareUpdater, CoarseFlash, FirmwareUpdaterConfig, State, active_size,
+    active_start, dfu_size, dfu_start, state_size, state_start, system_reset,
+};
+use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_time::Timer;
+use panic_halt as _;
+
+/// Must match the bootloader: the erase granularity embassy-boot sees.
+const COARSE_ERASE_SIZE: usize = 8192;
+/// `BlockingFirmwareUpdater::new()` insists on a buffer of exactly
+/// `STATE::WRITE_SIZE` bytes.
+const STATE_BUFFER_SIZE: usize = 256;
+
+/// Same flash type as the bootloader, so both see the same geometry.
+type AppFlash = CoarseFlash<Flash<'static, FlashBlocking>, COARSE_ERASE_SIZE>;
+type FlashMutex = Mutex<NoopRawMutex, RefCell<AppFlash>>;
+
+/// The half of the console we only need to write to.
+struct Tx<'d, T: Instance>(UartTx<'d, T, Blocking>);
+
+impl<T: Instance> Tx<'_, T> {
+    fn line(&mut self, s: &str) {
+        let _ = self.0.write_str(s);
+        let _ = self.0.write_str("\r\n");
+    }
+}
+
+#[embassy_executor::task]
+async fn blink(pin: Peri<'static, AnyPin>) {
+    // The nanoCH32V305 wires its status LED to PA3 active low, so start high to
+    // keep it off.
+    let mut led = Output::new(pin, Level::High, Default::default());
+
+    loop {
+        led.toggle();
+        Timer::after_millis(500).await;
+    }
+}
+
+#[embassy_executor::main(entry = "qingke_rt::entry")]
+async fn main(spawner: Spawner) -> ! {
+    ch32_hal::debug::SDIPrint::enable();
+
+    let p = ch32_hal::init(Default::default());
+
+    let mut config = Config::default();
+    config.baudrate = 115200;
+    // Note the argument order: the rx pin (PA10) comes first.
+    let uart = Uart::new_blocking(p.USART1, p.PA10, p.PA9, config).expect("USART1 config");
+    let (tx, mut rx) = uart.split();
+    let mut console = Tx(tx);
+
+    let flash = FlashMutex::new(RefCell::new(CoarseFlash(Flash::new_blocking(p.FLASH))));
+
+    console.line("\r\nCH32V305 embassy-boot example application");
+
+    // Read the boot state, then tell the bootloader that this image works. Until
+    // `mark_booted()` succeeds the bootloader considers the image untrusted and
+    // will revert it if the board resets.
+    let state = {
+        let mut aligned = AlignedBuffer([0u8; STATE_BUFFER_SIZE]);
+        let updater_config = FirmwareUpdaterConfig::from_linkerfile_blocking(&flash, &flash);
+        let mut updater = BlockingFirmwareUpdater::new(updater_config, aligned.as_mut());
+
+        match updater.get_state() {
+            Ok(state) => {
+                let _ = writeln!(&mut console.0, "boot state: {state:?}");
+                Some(state)
+            }
+            Err(e) => {
+                let _ = writeln!(&mut console.0, "failed to read state: {e:?}");
+                None
+            }
+        }
+        .and_then(|state| match updater.mark_booted() {
+            Ok(()) => Some(state),
+            Err(e) => {
+                let _ = writeln!(&mut console.0, "failed to mark boot: {e:?}");
+                None
+            }
+        })
+    };
+
+    if state == Some(State::Swap) {
+        console.line("this was a fresh image, it is now marked as booted");
+    }
+
+    match blink(p.PA3.into()) {
+        Ok(token) => spawner.spawn(token),
+        Err(_) => console.line("failed to spawn the blink task"),
+    }
+
+    console.line("commands: [i] info  [d] request firmware update");
+
+    // Polling loop: the uart is read non blocking, so the blink task keeps
+    // running while we wait for a key.
+    loop {
+        match rx.nb_read() {
+            Ok(byte) => {
+                let _ = console.0.blocking_write(&[byte, b'\r', b'\n']);
+                match byte.to_ascii_lowercase() {
+                    b'i' => print_info(&mut console),
+                    b'd' => request_dfu(&flash, &mut console),
+                    _ => console.line("i info, d update"),
+                }
+            }
+            // Nothing to read; `nb_read` reports framing/noise/overrun errors the
+            // same way, and they are cleared by the driver itself.
+            Err(_) => Timer::after_millis(2).await,
+        }
+    }
+}
+
+fn print_info<T: Instance>(console: &mut Tx<'_, T>) {
+    let _ = writeln!(
+        &mut console.0,
+        "active: 0x{:08x} +{} bytes",
+        embassy_boot_ch32::FLASH_BASE + active_start(),
+        active_size()
+    );
+    let _ = writeln!(
+        &mut console.0,
+        "dfu:    0x{:08x} +{} bytes",
+        embassy_boot_ch32::FLASH_BASE + dfu_start(),
+        dfu_size()
+    );
+    let _ = writeln!(
+        &mut console.0,
+        "state:  0x{:08x} +{} bytes",
+        embassy_boot_ch32::FLASH_BASE + state_start(),
+        state_size()
+    );
+    let _ = writeln!(
+        &mut console.0,
+        "this image runs at 0x{:08x} for {} bytes",
+        embassy_boot_ch32::FLASH_BASE + active_start(),
+        active_size()
+    );
+}
+
+/// Asks the bootloader to stay in its update session on the next boot and
+/// resets. Does not return on success.
+fn request_dfu<T: Instance>(flash: &FlashMutex, console: &mut Tx<'_, T>) {
+    console.line("requesting update, resetting into the bootloader");
+
+    let mut aligned = AlignedBuffer([0u8; STATE_BUFFER_SIZE]);
+    let updater_config = FirmwareUpdaterConfig::from_linkerfile_blocking(flash, flash);
+    let mut updater = BlockingFirmwareUpdater::new(updater_config, aligned.as_mut());
+
+    match updater.mark_dfu() {
+        Ok(()) => console.line("state marked for dfu"),
+        Err(e) => {
+            let _ = writeln!(&mut console.0, "failed to mark dfu: {e:?}");
+            return;
+        }
+    }
+
+    // A plain system reset, not a jump back into the bootloader: the application
+    // has enabled peripheral interrupts whose vectors the bootloader does not
+    // handle.
+    system_reset()
+}

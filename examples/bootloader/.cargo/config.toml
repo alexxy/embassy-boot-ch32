@@ -1,0 +1,12 @@
+[build]
+target = "riscv32imfc-unknown-none-elf.json"
+
+[unstable]
+build-std = ["core"]
+json-target-spec = true
+
+[target.riscv32imfc-unknown-none-elf]
+# `wlink` is the WCH RISC-V command line flash tool (part of the MounRiver/WCH
+# toolchain). It flashes the ELF at the addresses it was linked to and can watch
+# the SDI debug output.
+runner = "wlink -v flash --enable-sdi-print --watch-serial"
