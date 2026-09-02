@@ -1,0 +1,5 @@
+# Both examples are separate cargo workspaces with their own `target/`.
+target/
+
+# Images produced by tools/check_size.sh --bin
+*.bin

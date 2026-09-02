@@ -1,0 +1,51 @@
+[workspace]
+members = ["."]
+# The examples are standalone cargo workspaces: they are built for a different
+# target (and with a different memory.x) than the adapter crate itself.
+exclude = [
+    "examples/bootloader",
+    "examples/application",
+]
+
+[package]
+name = "embassy-boot-ch32"
+version = "0.1.0"
+edition = "2024"
+# `u32::is_multiple_of()` (used in the partition asserts) is stable since 1.87,
+# which is above the 1.85 that edition 2024 and the `cargo::error=` in `build.rs`
+# would require.
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+description = "embassy-boot support for WCH CH32 MCUs driven by ch32-hal (tested on CH32V305)"
+repository = "https://github.com/alexxy/embassy-boot-ch32"
+documentation = "https://docs.rs/embassy-boot-ch32"
+homepage = "https://github.com/alexxy/embassy-boot-ch32"
+keywords = ["embedded", "bootloader", "ch32", "risc-v", "embassy"]
+categories = ["embedded", "no-std"]
+# Not part of the crate; the CI workflow and the example workspaces (which are
+# separate packages) are repository material only.
+exclude = ["/.github/"]
+
+[dependencies]
+embassy-boot = { version = "0.7.0", default-features = false }
+embedded-storage = "0.3.1"
+
+# `log` and `defmt` are mutually exclusive. Cargo has no syntax for expressing
+# that, so `build.rs` rejects the combination with `cargo::error=`.
+[features]
+## Route the logs of the underlying `embassy-boot` through [`log`](https://docs.rs/log).
+##
+## Mutually exclusive with `defmt`; enabling both fails the build.
+log = ["embassy-boot/log"]
+## Route the logs of the underlying `embassy-boot` through [`defmt`](https://docs.rs/defmt).
+##
+## Mutually exclusive with `log`; enabling both fails the build.
+##
+## Note: `ch32-hal` currently pins `defmt` 0.3 while `embassy-boot` uses `defmt` 1.x,
+## so do not enable `ch32-hal/defmt` together with this feature.
+defmt = ["embassy-boot/defmt"]
+
+[package.metadata.docs.rs]
+# `all-features` would enable `log` and `defmt` together, which `build.rs`
+# rejects, so document with one back end.
+features = ["log"]
