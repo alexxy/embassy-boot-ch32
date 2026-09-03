@@ -1,10 +1,12 @@
 /* ---------------------------------------------------------------------------
- * Partition map for CH32V305RBT6 (128 KiB internal flash @ 0x0800_0000,
- * 32 KiB SRAM @ 0x2000_0000).
+ * Partition map for the CH32 parts with 128 KiB of application flash (USR_1)
+ * and 64 KiB of SRAM: CH32V203RBT6, CH32V208CBU6, CH32V208GBU6, CH32V208RBT6,
+ * CH32V208WBU6.
  *
- * This file is included by `memory/memory.x` of both the bootloader and the
- * application example (via `cargo:rustc-link-search`), so that the two binaries
- * can never disagree about where the partitions are.
+ * The flash split is identical to `flash128k-ram32k.x`; only the RAM region is
+ * larger. Selected by the `build.rs` of both examples from the chip feature and
+ * `INCLUDE`d by the `memory.x` generated there, so the bootloader and the
+ * application can never disagree about where the partitions are.
  *
  *  region            address            size    notes
  *  ----------------  -----------------  ------  --------------------------------
@@ -19,13 +21,16 @@
  *   PAGE_SIZE                        = 8192
  *   ACTIVE  % PAGE_SIZE == 0         -> 49152 / 8192 = 6 blocks
  *   DFU     % PAGE_SIZE == 0         -> 57344 / 8192 = 7 blocks
- *   DFU - ACTIVE >= PAGE_SIZE        -> 8192 >= 8192
+ *   DFU - ACTIVE >= PAGE_SIZE        -> 8192 >= 8192 (the swap needs one spare)
  *   2 + 4 * (ACTIVE / PAGE_SIZE) = 26 <= STATE / WRITE_SIZE = 8192 / 256 = 32
  *
- * NOTE: ch32-metapac reports `FLASH_SIZE = 480 KiB` for this chip (the size of
- * the largest member of the family) while CH32V305RBT6 only has 128 KiB. The
- * flash driver accepts accesses up to 480 KiB without complaining, so keeping
- * the partitions inside 0x0800_0000..0x0802_0000 is up to us.
+ * NOTE: for these parts the flash/RAM split is a real runtime option: the
+ * `memory_x` options of ch32-metapac (`c128_r64`, `c144_r48`, `c160_r32`, ...)
+ * trade the extra on-die flash against RAM through the option bytes. This map
+ * assumes the default `c128_r64` configuration, i.e. 128 KiB of flash and 64
+ * KiB of RAM. If you pick another split, resize `RAM` (and the flash regions)
+ * accordingly and make sure `FLASH_OBR.RAM_CODE_MOD` matches, or the chip takes
+ * an instruction access fault (`mcause = 0x7`) as soon as it fetches code.
  * ------------------------------------------------------------------------- */
 
 MEMORY
@@ -36,7 +41,7 @@ MEMORY
   DFU              (rx)  : ORIGIN = 0x08010000, LENGTH = 56K
   BOOTLOADER_STATE (rx)  : ORIGIN = 0x0801E000, LENGTH = 8K
 
-  RAM             (rwx) : ORIGIN = 0x20000000, LENGTH = 32K
+  RAM             (rwx) : ORIGIN = 0x20000000, LENGTH = 64K
 }
 
 /* embassy-boot expects offsets from the start of the flash array, not bus

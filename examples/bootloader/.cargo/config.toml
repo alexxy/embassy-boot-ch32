@@ -1,12 +1,23 @@
+# The examples build for several chips (see `examples/chips.rs` and the target
+# table in the README). The default chip feature is `ch32v305rbt6`, so the
+# default target is the CH32V3 line's JSON target spec; pick another chip with
+# `--no-default-features --features <part> --target <target>`.
+#
+# `riscv32imc-unknown-none-elf` (CH32V203/V208) is a built-in target and needs
+# no spec file, `riscv32imfc-unknown-none-elf` (CH32V303/V305/V307) is not, so
+# it is passed as `riscv32imfc-unknown-none-elf.json`.
 [build]
 target = "riscv32imfc-unknown-none-elf.json"
 
-[unstable]
-build-std = ["core"]
-json-target-spec = true
-
-[target.riscv32imfc-unknown-none-elf]
+[target.riscv32imc-unknown-none-elf]
 # `wlink` is the WCH RISC-V command line flash tool (part of the MounRiver/WCH
 # toolchain). It flashes the ELF at the addresses it was linked to and can watch
 # the SDI debug output.
 runner = "wlink -v flash --enable-sdi-print --watch-serial"
+
+[target.riscv32imfc-unknown-none-elf]
+runner = "wlink -v flash --enable-sdi-print --watch-serial"
+
+[unstable]
+build-std = ["core"]
+json-target-spec = true

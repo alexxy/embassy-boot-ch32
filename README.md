@@ -8,18 +8,20 @@
 
 [`embassy-boot`](https://github.com/embassy-rs/embassy) support for WCH CH32
 microcontrollers driven by
-[`ch32-hal`](https://github.com/ch32-rs/ch32-hal). Tested on the **CH32V305RBT6**
-(QingKe V4 core, 128 KiB flash / 32 KiB RAM); the adapter crate itself is not
-V305 specific as long as the chip uses the `ch32-hal` flash driver.
+[`ch32-hal`](https://github.com/ch32-rs/ch32-hal): a `NorFlash` adapter, a
+linker-script driven partition map, and a pair of bootloader / application
+examples that build for 20 parts across 5 chip families. Tested on real hardware
+on the **CH32V305RBT6**.
 
 ```sh
 cargo add embassy-boot-ch32 --features log
 ```
 
-The examples target the
+The examples default to the
 [`nanoCH32V305`](https://github.com/wuxx/nanoCH32V305) board: its status LED is
 on **PA3, active low**, and both consoles live on **USART1** (**PA9** TX /
-**PA10** RX) at 115200 8N1.
+**PA10** RX) at 115200 8N1. Both are one-line changes in `src/main.rs` for
+another board.
 
 The crate provides the glue that embassy-boot needs on top of `ch32-hal`:
 
@@ -30,6 +32,50 @@ The crate provides the glue that embassy-boot needs on top of `ch32-hal`:
 * `BootLoader::load()` — jumps from the bootloader into the active partition,
 * `system_reset()` — a software reset through the QingKe PFIC.
 
+## Supported chips
+
+One cargo feature per part (the lower case part number, same spelling as in
+`ch32-hal`); `build.rs` of each example resolves it to a partition map and to
+the target the part needs.
+
+| family | core | target | parts | partition map |
+| --- | --- | --- | --- | --- |
+| CH32V203 | QingKe V4B, no FPU | `riscv32imc-unknown-none-elf` | C8T6, C8U6, F8P6, F8U6, G8R6, K8T6 | `flash64k-ram20k.x` |
+| CH32V208 | QingKe V4C + Bluetooth, no FPU | `riscv32imc-unknown-none-elf` | CBU6, GBU6, RBT6, WBU6 | `flash128k-ram64k.x` |
+| CH32V303 | QingKe V4F | `riscv32imfc-unknown-none-elf` | CBT6, RBT6 (128 KiB), RCT6, VCT6 (256 KiB) | `flash128k-ram32k.x`, `flash256k-ram64k.x` |
+| CH32V305 | QingKe V4F, USB OTG HS | `riscv32imfc-unknown-none-elf` | FBP6, GBU6, RBT6 | `flash128k-ram32k.x` |
+| CH32V307 | QingKe V4F, Ethernet | `riscv32imfc-unknown-none-elf` | RCT6, VCT6, WCU6 | `flash256k-ram64k.x` |
+
+The canonical list lives in [`examples/chips.rs`](examples/chips.rs), which both
+`build.rs` files `include!`, so the two binaries can never disagree about the
+geometry. `tools/build_matrix.sh --list` prints it.
+
+### Not (yet) supported
+
+A runtime bootloader needs a working flash *driver*, and `ch32-hal` only has one
+for the `flash` IP version `v3` — the CH32V2 and CH32V3 lines. For every other
+version `ch32-hal` selects a stub (`src/flash/mod.rs` picks `v3.rs` under
+`cfg(flash_v3)` and `other.rs`, where every operation is `unimplemented!()`,
+otherwise):
+
+| family | `flash` IP version | state |
+| --- | --- | --- |
+| CH32V103 | `v1` | no driver upstream |
+| CH32V003, CH641 | `v0` | no driver upstream (16 KiB flash / 2 KiB RAM, too small anyway) |
+| CH32X033, CH32X035 | `x0` | no driver upstream |
+| CH32L103 | `l1` | no driver upstream |
+
+Two further exclusions:
+
+* **CH32V203RBT6** is left out even though its flash IP is `v3`. It is the only
+  CH32V203 part with a 32-bit general purpose timer (TIM5, a `GPTM32` in
+  `ch32-metapac`), and `ch32-hal` does not compile for such a part outside
+  CH32V208/CH32L1: `TimerBits::Bits32` is
+  `#[cfg(any(ch32l1, ch32v208))]` while the `foreach_interrupt!` arm for
+  `timer, GPTM32, UP` uses it unconditionally.
+* **32 KiB flash parts** (CH32V203C6T6/F6P6/G6U6/K6T6 and friends) are too small
+  for a 16 KiB bootloader plus two images plus a state partition.
+
 ## Layout
 
 ```
@@ -37,29 +83,47 @@ The crate provides the glue that embassy-boot needs on top of `ch32-hal`:
 ├── src/lib.rs                  the adapter crate
 ├── build.rs                    rejects `log` and `defmt` at the same time
 ├── partition-map/
-│   └── ch32v305rbt6.x          single source of truth for the partition map
+│   ├── flash64k-ram20k.x       one map per (flash, RAM) geometry
+│   ├── flash128k-ram32k.x
+│   ├── flash128k-ram64k.x
+│   └── flash256k-ram64k.x
 ├── examples/
+│   ├── chips.rs                chip -> map -> target table, included by both build.rs
 │   ├── bootloader/             blocking bootloader with a serial console
 │   └── application/            embassy application with mark_booted()/mark_dfu()
 ├── tools/
 │   ├── serial_update.py        host side of the serial update protocol
-│   └── check_size.sh           partition fit + entry point guard
+│   ├── check_size.sh           partition fit + entry point guard
+│   ├── check_partitions.py     validates the partition maps statically
+│   └── build_matrix.sh         builds (and checks) every supported chip
 └── .github/workflows/ci.yml    GitHub Actions CI
 ```
 
 Both examples are standalone cargo workspaces (they build for a different target
-and use a different `memory.x` than the crate), and both `memory/memory.x` files
-`INCLUDE` the shared `partition-map/ch32v305rbt6.x`, so the two binaries can
-never disagree about where the partitions are.
+and use a different `memory.x` than the crate). Neither carries a `memory.x` in
+the repository: `build.rs` generates one that `INCLUDE`s the partition map
+selected by the chip feature and aliases `FLASH` to `BOOTLOADER` (bootloader) or
+`ACTIVE` (application), so the two binaries can never disagree about where the
+partitions are.
 
-## Partition map (CH32V305RBT6)
+## Partition maps
 
-| region             | address      | size   | contents                        |
-| ------------------ | ------------ | ------ | ------------------------------- |
-| `BOOTLOADER`       | `0x0800_0000` | 16 KiB | the bootloader                  |
-| `ACTIVE`           | `0x0800_4000` | 48 KiB | the running application         |
-| `DFU`              | `0x0801_0000` | 56 KiB | the incoming image              |
-| `BOOTLOADER_STATE` | `0x0801_E000` | 8 KiB  | embassy-boot state              |
+Maps are named after the nominal application flash and the SRAM they are written
+for, because several parts share one geometry. All sizes are multiples of the
+8 KiB erase granularity embassy-boot sees (see below), and the `DFU` partition is
+always at least one 8 KiB block larger than `ACTIVE`, as the swap requires a
+spare block.
+
+| map | flash | RAM | `BOOTLOADER` | `ACTIVE` | `DFU` | `BOOTLOADER_STATE` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `flash64k-ram20k.x` | 64 KiB | 20 KiB | 16 KiB `0x0800_0000` | 16 KiB `0x0800_4000` | 24 KiB `0x0800_8000` | 8 KiB `0x0800_E000` |
+| `flash128k-ram32k.x` | 128 KiB | 32 KiB | 16 KiB `0x0800_0000` | 48 KiB `0x0800_4000` | 56 KiB `0x0801_0000` | 8 KiB `0x0801_E000` |
+| `flash128k-ram64k.x` | 128 KiB | 64 KiB | 16 KiB `0x0800_0000` | 48 KiB `0x0800_4000` | 56 KiB `0x0801_0000` | 8 KiB `0x0801_E000` |
+| `flash256k-ram64k.x` | 256 KiB | 64 KiB | 16 KiB `0x0800_0000` | 104 KiB `0x0800_4000` | 120 KiB `0x0801_E000` | 16 KiB `0x0803_C000` |
+
+`tools/check_partitions.py` validates every map in `partition-map/` (contiguity,
+page alignment, the embassy-boot state capacity inequality, total size, RAM size
+taken from the file name) and runs in CI.
 
 ### Why `CoarseFlash` and why an 8 KiB state partition
 
@@ -83,10 +147,10 @@ is that the swap can be interrupted by a power loss at any time and still be
 resumed or reverted.
 
 Other constraints that shaped the table above (all checked at compile time by
-`assert_partitions`):
+`assert_partitions`, and statically by `tools/check_partitions.py`):
 
-* `active_size % 8192 == 0` → 48 KiB,
-* `dfu_size % 8192 == 0` → 56 KiB,
+* `active_size % 8192 == 0`,
+* `dfu_size % 8192 == 0`,
 * `dfu_size - active_size >= 8192` (the swap needs one spare block),
 * the bootloader's copy buffer (1024 bytes) must divide the page size and be a
   multiple of `WRITE_SIZE`.
@@ -94,39 +158,60 @@ Other constraints that shaped the table above (all checked at compile time by
 ## Building
 
 Prerequisites: a Rust nightly with `rust-src` (both examples pin it in
-`rust-toolchain.toml`; `build-std` is used because `riscv32imfc-unknown-none-elf`
-is a JSON target spec), and optionally WCH's `wlink` command line tool (shipped
-with MounRiver Studio) for flashing.
+`rust-toolchain.toml`; `build-std` is used because
+`riscv32imfc-unknown-none-elf` is a JSON target spec), and optionally WCH's
+`wlink` command line tool (shipped with MounRiver Studio) for flashing.
 
 ```sh
 # the adapter crate (host target, only checks that it compiles)
 cargo check
 
-# the bootloader
+# the bootloader and the application for the default chip (CH32V305RBT6)
 cd examples/bootloader && cargo build --release
-
-# the application
 cd ../application && cargo build --release
 ```
 
-`tools/check_size.sh` checks that a binary still fits its partition *and* that
-its entry point is where the partition map expects it (the two things CI checks
-for every build):
+For another part, pick its feature *and* the target it needs (the table above,
+or `tools/build_matrix.sh --list`):
 
 ```sh
-$ tools/check_size.sh \
-    --elf examples/bootloader/target/riscv32imfc-unknown-none-elf/release/bootloader-ch32v305 \
-    --partition BOOTLOADER --limit 16384 --entry 0x08000000 --bin bootloader.bin
-BOOTLOADER: flash 13724 bytes (text 13704 + data 20), RAM .bss 224 bytes, limit 16384
-BOOTLOADER: 83% of the partition used, 2660 bytes to spare
-BOOTLOADER: entry point 0x08000000
-wrote bootloader.bin (13724 bytes)
+cd examples/bootloader
+cargo build --release --no-default-features --features ch32v208rbt6 \
+    --target riscv32imc-unknown-none-elf
 ```
 
-It uses the `llvm-tools` of the active toolchain
-(`rustup component add llvm-tools`) and can be pointed at another `llvm-size`
-with `$LLVM_SIZE`. If the bootloader does not fit anymore, either shrink it or
-move the `ACTIVE`/`DFU` regions up in `partition-map/ch32v305rbt6.x`.
+`build.rs` refuses to continue if the feature and the target disagree, so a
+`--target` mistake is a short error message instead of a link failure. The
+output binaries are called `bootloader` and `application`.
+
+To build (and size check) everything:
+
+```sh
+tools/build_matrix.sh                      # every chip, both examples
+tools/build_matrix.sh --example bootloader # one example
+tools/build_matrix.sh --chip ch32v307rct6 --bin-dir dist
+```
+
+`tools/check_size.sh` checks that a binary still fits its partition *and* that
+its entry point is where the partition map expects it. Both the limit and the
+expected entry point are derived from the `__bootloader_active_start` /
+`__bootloader_active_end` symbols in the ELF itself, so the numbers are never
+duplicated outside the map:
+
+```sh
+$ tools/check_size.sh --elf examples/bootloader/target/riscv32imfc-unknown-none-elf/release/bootloader \
+    --role bootloader --label ch32v305rbt6-bootloader
+ch32v305rbt6-bootloader (bootloader): must fit the bootloader partition at the start of flash, below 0x08004000, limit 16384 bytes
+ch32v305rbt6-bootloader: flash 14160 bytes (text 14140 + data 20), RAM .bss 224 bytes
+ch32v305rbt6-bootloader: 86% used, 2224 bytes to spare
+ch32v305rbt6-bootloader: entry point 0x08000000
+```
+
+`--role application` uses the `ACTIVE` partition instead. The script uses the
+`llvm-tools` of the active toolchain (`rustup component add llvm-tools`) and can
+be pointed at another tool with `$LLVM_SIZE`, `$LLVM_NM`, … If the bootloader
+does not fit anymore, either shrink it or move `ACTIVE`/`DFU` up in the
+partition map it uses.
 
 ## Flashing
 
@@ -137,17 +222,17 @@ simply boot whatever is in `ACTIVE`.
 
 ```sh
 # with wlink (the `cargo run` runner does the same thing)
-wlink flash examples/bootloader/target/riscv32imfc-unknown-none-elf/release/bootloader-ch32v305
-wlink flash examples/application/target/riscv32imfc-unknown-none-elf/release/application-ch32v305
+wlink flash examples/bootloader/target/riscv32imfc-unknown-none-elf/release/bootloader
+wlink flash examples/application/target/riscv32imfc-unknown-none-elf/release/application
 ```
 
-The nanoCH32V305 can also be programmed over its USB1 port without a debugger,
+A nanoCH32V305 can also be programmed over its USB1 port without a debugger,
 with [`wchisp`](https://github.com/ch32-rs/wchisp): hold BOOT, press and release
 RST, release BOOT, then
 
 ```sh
-wchisp flash examples/bootloader/target/riscv32imfc-unknown-none-elf/release/bootloader-ch32v305
-wchisp flash examples/application/target/riscv32imfc-unknown-none-elf/release/application-ch32v305
+wchisp flash examples/bootloader/target/riscv32imfc-unknown-none-elf/release/bootloader
+wchisp flash examples/application/target/riscv32imfc-unknown-none-elf/release/application
 ```
 
 `wchisp` understands ELF and programs each segment at its linked address, so the
@@ -157,7 +242,7 @@ application lands in `ACTIVE` without an intermediate `.bin`.
 # raw binary, if your tool wants a .bin
 # (`llvm-objcopy`, or `rust-objcopy` after `rustup component add llvm-tools`)
 llvm-objcopy -O binary \
-  examples/application/target/riscv32imfc-unknown-none-elf/release/application-ch32v305 \
+  examples/application/target/riscv32imfc-unknown-none-elf/release/application \
   application.bin
 ```
 
@@ -203,7 +288,7 @@ provided:
 
 ```sh
 llvm-objcopy -O binary \
-  examples/application/target/riscv32imfc-unknown-none-elf/release/application-ch32v305 \
+  examples/application/target/riscv32imfc-unknown-none-elf/release/application \
   application.bin
 
 python3 tools/serial_update.py /dev/ttyUSB0 application.bin
@@ -232,11 +317,15 @@ active image; it only makes the bootloader wait for a new one.
 
 ## Caveats
 
-* **`ch32-metapac` reports `FLASH_SIZE = 480 KiB` for `ch32v305rbt6`** (the
-  largest member of the family) while the RBT6 only has 128 KiB, and the flash
-  driver bounds its checks with that constant. Nothing will stop a partition map
-  that runs past `0x0802_0000`; keeping the map inside 128 KiB is our
-  responsibility.
+* **Only the CH32V2/V3 flash controller is implemented upstream.** Everything
+  above the line "Not (yet) supported" is a limitation of `ch32-hal`, not of this
+  crate: the adapter itself is chip agnostic.
+* **`ch32-metapac` over-reports flash size.** It reports `FLASH_SIZE` as the
+  size of the largest member of the family plus its extra `USR_2` region (480 KiB
+  for a 128 KiB CH32V305RBT6), and the flash driver bounds its checks with that
+  constant. Nothing will stop a partition map that runs past the physical flash;
+  keeping the map inside the part's nominal flash is our responsibility, which is
+  what `tools/check_partitions.py` checks.
 * **Option bytes.** This example assumes the factory configuration: the chip
   boots through the on-chip monitor ROM into the user flash at `0x0800_0000`. If
   you have used WCHISPTool or `wlink` to change the boot configuration (boot
@@ -248,7 +337,7 @@ active image; it only makes the bootloader wait for a new one.
   feature.
 * **No `defmt` for now.** `ch32-hal` pins `defmt` 0.3 while `embassy-boot` uses
   `defmt` 1.x, so the `defmt` feature of this crate cannot be combined with
-  `ch32-hal/defmt`.
+  `ch32-hal/defmt`. The examples therefore use `log`.
 * **`log` and `defmt` are exclusive.** Cargo cannot express that in
   `[features]`, so `build.rs` turns the combination into a build error
   (`cargo::error=`, Rust 1.84+) instead of letting it fail deep inside
@@ -263,13 +352,22 @@ active image; it only makes the bootloader wait for a new one.
 
 ## Porting to another chip
 
-1. add `partition-map/<your chip>.x` (copy the CH32V305 one) with regions that
-   satisfy the constraints above,
-2. point `memory/memory.x` of both examples at it and pick the region each binary
-   lives in via `REGION_ALIAS("FLASH", ...)`,
-3. keep `CoarseFlash<_, N>` where `N` is a multiple of the hardware page size and
-   divides all three partitions,
-4. adjust the LED pin and the UART instance/pins in the examples.
+If the part has the `v3` flash IP, adding it is three steps:
+
+1. pick the geometry: reuse a map in `partition-map/`, or add one for the new
+   `(flash, RAM)` pair and make sure `tools/check_partitions.py` is happy with
+   it,
+2. add a `Chip { part, map, target }` entry to `examples/chips.rs` and a
+   `ch32XXXX = ["ch32-hal/ch32XXXX"]` feature to both examples' `Cargo.toml`,
+3. adjust the LED pin and the UART instance/pins in the examples if the board
+   differs from a nanoCH32V305.
+
+`tools/build_matrix.sh --chip <part>` then builds and size checks both binaries,
+and CI picks the part up automatically (its matrix is generated from
+`examples/chips.rs`).
+
+For a part with a different flash controller the real work is upstream: a driver
+in `ch32-hal` for that `flash` IP version.
 
 ## Continuous integration
 
@@ -278,8 +376,10 @@ on pull requests and manually:
 
 | job | toolchains | what it does |
 | --- | --- | --- |
-| `crate` | stable, nightly | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the same for `--features log` and `--features defmt` separately, `cargo doc` with `RUSTDOCFLAGS=-D warnings` |
-| `bootloader` / `application` | nightly | `cargo fmt --check`, `cargo clippy --release -D warnings`, `cargo build --release`, `tools/check_size.sh` (partition fit + entry point), uploads the ELF and the `.bin` |
+| `crate` | stable, nightly | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the same for `--features log` and `--features defmt` separately, `cargo doc` with `RUSTDOCFLAGS=-D warnings`, `python3 tools/check_partitions.py` |
+| `chips` | — | turns `examples/chips.rs` into the chip matrix for the next job |
+| `firmware` (one job per part) | nightly | `tools/build_matrix.sh --chip <part>`: builds the bootloader and the application for the target that part needs, checks both with `tools/check_size.sh`, uploads `dist/<part>/*.bin` as `firmware-<part>` |
+| `examples-lint` | nightly | `cargo fmt --check` and `cargo clippy --release -D warnings` for both examples (default part) |
 
 A few things worth knowing:
 
@@ -290,9 +390,11 @@ A few things worth knowing:
 * Everything runs with `--locked`. The examples depend on `ch32-hal` from git,
   so the committed `Cargo.lock` is what pins the exact upstream revision; update
   it on purpose with `cargo update -p ch32-hal` and commit the new lock.
-* The partition limits are repeated in the CI matrix (`limit:`/`entry:` per
-  example) because a CI job cannot read them from the linker script. Keep them
-  in sync with `partition-map/ch32v305rbt6.x` when you resize partitions.
+* No partition sizes or entry points are duplicated in the workflow: the limits
+  come from the ELF symbols and the chip list from `examples/chips.rs`.
+* The `firmware` jobs cache only the downloaded registry and git checkouts
+  (`cache-targets: false`): every part is a different feature set, so caching
+  `target/` would store 20 near-identical trees.
 * The nightly leg exists to catch new lints early, which also means it can go
   red on clippy churn that is not a real problem; pin a known-good nightly in a
   `rust-toolchain.toml` if that bothers you.

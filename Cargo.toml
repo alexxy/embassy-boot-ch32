@@ -9,22 +9,27 @@ exclude = [
 
 [package]
 name = "embassy-boot-ch32"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # `u32::is_multiple_of()` (used in the partition asserts) is stable since 1.87,
 # which is above the 1.85 that edition 2024 and the `cargo::error=` in `build.rs`
 # would require.
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
-description = "embassy-boot support for WCH CH32 MCUs driven by ch32-hal (tested on CH32V305)"
+description = "embassy-boot support for WCH CH32V2/CH32V3 MCUs driven by ch32-hal"
 repository = "https://github.com/alexxy/embassy-boot-ch32"
 documentation = "https://docs.rs/embassy-boot-ch32"
 homepage = "https://github.com/alexxy/embassy-boot-ch32"
 keywords = ["embedded", "bootloader", "ch32", "risc-v", "embassy"]
 categories = ["embedded", "no-std"]
-# Not part of the crate; the CI workflow and the example workspaces (which are
-# separate packages) are repository material only.
-exclude = ["/.github/"]
+# Not part of the crate; the CI workflow, the example workspaces and the helper
+# scripts (which are separate packages or repository tooling) are repository
+# material only.
+exclude = ["/.github/", "/examples/", "/tools/"]
+# `examples/` holds the standalone example workspaces plus the shared
+# `examples/chips.rs` chip table that their build scripts parse; none of it is
+# an example target of this crate, so do not let cargo autodiscover it.
+autoexamples = false
 
 [dependencies]
 embassy-boot = { version = "0.7.0", default-features = false }

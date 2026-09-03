@@ -1,22 +1,23 @@
 [workspace]
 
 [package]
-name = "application-ch32v305"
+name = "application"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Example application for the CH32V305RBT6 embassy-boot example"
+description = "Example embassy application for the embassy-boot CH32 example"
 
 [[bin]]
-name = "application-ch32v305"
+name = "application"
 harness = false
 
 [dependencies]
 ch32-hal = { git = "https://github.com/ch32-rs/ch32-hal.git", default-features = false, features = [
-    "ch32v305rbt6",
     "rt",
     "embassy",
-    "time-driver-tim2",
+    # `any` lets `ch32-hal` pick the first general purpose timer the selected
+    # part actually has (TIM5, TIM4, TIM3 or TIM2).
+    "time-driver-any",
 ] }
 embassy-boot-ch32 = { path = "../.." }
 embassy-executor = { version = "0.10.0", features = [
@@ -28,6 +29,43 @@ embassy-time = "0.5.1"
 embedded-storage = "0.3.1"
 panic-halt = "1.0"
 qingke-rt = "0.7"
+
+[features]
+# Exactly one chip feature has to be enabled: `build.rs` resolves it to a
+# partition map in `../../partition-map` and to the target the part needs, and
+# forwards it to the matching `ch32-hal` part feature.
+#
+# Build another part with
+# `cargo build --release --no-default-features --features <part> --target <target>`,
+# see the table in the README.
+default = ["ch32v305rbt6"]
+
+# CH32V203, riscv32imc-unknown-none-elf
+ch32v203c8t6 = ["ch32-hal/ch32v203c8t6"]
+ch32v203c8u6 = ["ch32-hal/ch32v203c8u6"]
+ch32v203f8p6 = ["ch32-hal/ch32v203f8p6"]
+ch32v203f8u6 = ["ch32-hal/ch32v203f8u6"]
+ch32v203g8r6 = ["ch32-hal/ch32v203g8r6"]
+ch32v203k8t6 = ["ch32-hal/ch32v203k8t6"]
+ch32v203rbt6 = ["ch32-hal/ch32v203rbt6"]
+# CH32V208, riscv32imc-unknown-none-elf
+ch32v208cbu6 = ["ch32-hal/ch32v208cbu6"]
+ch32v208gbu6 = ["ch32-hal/ch32v208gbu6"]
+ch32v208rbt6 = ["ch32-hal/ch32v208rbt6"]
+ch32v208wbu6 = ["ch32-hal/ch32v208wbu6"]
+# CH32V303, riscv32imfc-unknown-none-elf
+ch32v303cbt6 = ["ch32-hal/ch32v303cbt6"]
+ch32v303rbt6 = ["ch32-hal/ch32v303rbt6"]
+ch32v303rct6 = ["ch32-hal/ch32v303rct6"]
+ch32v303vct6 = ["ch32-hal/ch32v303vct6"]
+# CH32V305, riscv32imfc-unknown-none-elf
+ch32v305fbp6 = ["ch32-hal/ch32v305fbp6"]
+ch32v305gbu6 = ["ch32-hal/ch32v305gbu6"]
+ch32v305rbt6 = ["ch32-hal/ch32v305rbt6"]
+# CH32V307, riscv32imfc-unknown-none-elf
+ch32v307rct6 = ["ch32-hal/ch32v307rct6"]
+ch32v307vct6 = ["ch32-hal/ch32v307vct6"]
+ch32v307wcu6 = ["ch32-hal/ch32v307wcu6"]
 
 [profile.release]
 codegen-units = 1

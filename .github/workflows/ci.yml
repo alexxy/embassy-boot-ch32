@@ -83,74 +83,98 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked --lib
 
-  # The examples are separate workspaces built for
-  # `riscv32imfc-unknown-none-elf` with `build-std`, i.e. nightly only. Each of
-  # them also has to fit into its partition of the shared partition map.
-  examples:
-    name: ${{ matrix.example }}
+      # The partition maps are the one piece of geometry both examples and CI
+      # depend on; validate it against the requirements embassy-boot checks at
+      # runtime.
+      - name: Partition maps
+        run: python3 tools/check_partitions.py
+
+  # The chip list lives in `examples/chips.rs`; publishing it as a job output
+  # keeps this workflow from keeping a second copy of it in sync.
+  chips:
+    name: Chip list
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: list
+        run: |
+          parts="$(tools/build_matrix.sh --list | awk 'NR>1 { printf "\"%s\",", $1 }' | sed 's/,$//')"
+          printf 'matrix={"chip":[%s]}\n' "$parts" >>"$GITHUB_OUTPUT"
+
+  # One job per part: builds the bootloader and the application for the target
+  # that part needs and checks both against the partition map they were linked
+  # against (the limits come from the `__bootloader_*` symbols in the ELF, so no
+  # numbers are duplicated here).
+  firmware:
+    name: ${{ matrix.chip }}
+    needs: chips
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - example: bootloader
-            binary: bootloader-ch32v305
-            partition: BOOTLOADER
-            limit: 16384
-            entry: "0x08000000"
-          - example: application
-            binary: application-ch32v305
-            partition: ACTIVE
-            limit: 49152
-            entry: "0x08004000"
+      matrix: ${{ fromJSON(needs.chips.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          # `rust-src` is needed by `build-std = ["core"]`, the custom target
-          # spec does the rest.
+          # `rust-src` is needed by `build-std = ["core"]`; the CH32V3 parts are
+          # built from the JSON target spec next to the examples.
+          components: rust-src
+
+      # Provides the `llvm-*` tools used by `tools/check_size.sh`. The component
+      # was renamed from `llvm-tools-preview`, so try both names.
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools || rustup component add llvm-tools-preview
+
+      # Only the downloaded registry and git checkouts are cached: every part is
+      # a different feature set, so caching `target/` would store 20 near-identical
+      # trees without hitting them again.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      # `--locked` keeps the git dependency on `ch32-hal` pinned to the revision
+      # in the examples' `Cargo.lock`, so a new upstream commit cannot break CI.
+      - name: Build and check
+        env:
+          CARGO_ARGS: --locked
+        run: tools/build_matrix.sh --chip ${{ matrix.chip }} --bin-dir dist/${{ matrix.chip }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.chip }}
+          path: dist/${{ matrix.chip }}
+          if-no-files-found: error
+
+  # Lints the examples for the default part only: the chip matrix above proves
+  # they build everywhere, and the lints do not depend on the part.
+  examples-lint:
+    name: examples lint (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [bootloader, application]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
           components: rust-src, rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: examples/${{ matrix.example }} -> target
-          key: ${{ matrix.example }}
+          key: lint-${{ matrix.example }}
 
       - name: Format
         working-directory: examples/${{ matrix.example }}
         run: cargo fmt --all -- --check
 
-      # `--locked` keeps the git dependency on `ch32-hal` pinned to the revision
-      # in the example's `Cargo.lock`, so a new upstream commit cannot break CI.
       - name: Clippy
         working-directory: examples/${{ matrix.example }}
         run: cargo clippy --release --locked -- -D warnings
-
-      - name: Build
-        working-directory: examples/${{ matrix.example }}
-        run: cargo build --release --locked
-
-      - name: Install llvm-tools
-        run: rustup component add llvm-tools || rustup component add llvm-tools-preview
-
-      - name: Partition size check
-        working-directory: examples/${{ matrix.example }}
-        env:
-          example: ${{ matrix.example }}
-        run: |
-          bash ../../tools/check_size.sh \
-            --elf target/riscv32imfc-unknown-none-elf/release/${{ matrix.binary }} \
-            --partition ${{ matrix.partition }} \
-            --limit ${{ matrix.limit }} \
-            --entry ${{ matrix.entry }} \
-            --bin ${{ matrix.binary }}.bin
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.binary }}
-          path: |
-            examples/${{ matrix.example }}/target/riscv32imfc-unknown-none-elf/release/${{ matrix.binary }}
-            examples/${{ matrix.example }}/${{ matrix.binary }}.bin
-          if-no-files-found: error

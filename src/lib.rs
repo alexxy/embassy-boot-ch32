@@ -14,6 +14,12 @@
 //!   the global pointer and the stack pointer itself during its startup code, so
 //!   all the bootloader has to do is to mask interrupts and jump.
 //!
+//! Note that the flash driver in [ch32-hal] is only implemented for the `v3`
+//! flash IP used by the CH32V2 and CH32V3 lines (CH32V203, CH32V208, CH32V303,
+//! CH32V305, CH32V307, ...). For the older parts (`v0`, `v1`, `x0`, `l1`) the
+//! driver compiles to `unimplemented!()` stubs, so a runtime bootloader cannot
+//! be built for them yet.
+//!
 //! The partition geometry is expected to be described by the usual
 //! `__bootloader_active_start`/`__bootloader_dfu_start`/`__bootloader_state_start`
 //! (and matching `_end`) linker symbols, holding offsets from the start of
@@ -42,6 +48,7 @@
 //! ```
 //!
 //! [`embassy-boot-stm32`]: https://docs.rs/embassy-boot-stm32
+//! [ch32-hal]: https://github.com/ch32-rs/ch32-hal
 
 #![no_std]
 #![warn(missing_docs)]

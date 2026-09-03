@@ -3,3 +3,8 @@ target/
 
 # Images produced by tools/check_size.sh --bin
 *.bin
+
+# Firmware collections produced by tools/build_matrix.sh --bin-dir
+dist/
+
+__pycache__/
