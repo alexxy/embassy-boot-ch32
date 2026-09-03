@@ -1,7 +1,7 @@
 # embassy-boot-ch32
 
 [![crates.io](https://img.shields.io/crates/v/embassy-boot-ch32.svg)](https://crates.io/crates/embassy-boot-ch32)
-[![docs.rs](https://img.shields.io/docs.rs/embassy-boot-ch32/latest)](https://docs.rs/embassy-boot-ch32)
+[![docs.rs](https://img.shields.io/docsrs/embassy-boot-ch32/latest)](https://docs.rs/embassy-boot-ch32)
 [![CI](https://github.com/alexxy/embassy-boot-ch32/actions/workflows/ci.yml/badge.svg)](https://github.com/alexxy/embassy-boot-ch32/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE-MIT)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE-APACHE)
