@@ -524,6 +524,16 @@ The badges above (and the workflow itself) start working with the first push to
 GitHub. The docs.rs badge turns green once docs.rs has built the published
 version.
 
+## Roadmap
+
+* **CAN-bus updates.** A draft protocol specification for flashing one specific
+  node on a multi-node CAN bus (7-bit NodeID filtering plus verification against
+  the factory 96-bit unique device ID) lives in
+  [docs/can-update-protocol.md](docs/can-update-protocol.md). No implementation
+  has started; feedback on the draft is very welcome.
+* Re-enable **CH32V203RBT6** once the upstream `ch32-hal` timer-variant bug is
+  fixed (see [Not (yet) supported](#not-yet-supported)).
+
 ## License
 
 MIT OR Apache-2.0.
