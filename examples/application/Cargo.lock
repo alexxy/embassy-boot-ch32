@@ -13,13 +13,15 @@ dependencies = [
 
 [[package]]
 name = "application"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "ch32-hal",
  "embassy-boot-ch32",
  "embassy-executor",
  "embassy-sync",
  "embassy-time",
+ "embassy-usb",
+ "embassy-usb-dfu",
  "embedded-storage",
  "panic-halt",
  "qingke-rt",
@@ -51,6 +53,12 @@ name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
+
+[[package]]
+name = "bitflags"
+version = "2.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "bitmaps"
@@ -256,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "embassy-boot-ch32"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embassy-boot",
  "embedded-storage",
@@ -398,6 +406,37 @@ checksum = "168297bf80aaf114b3c9ad589bf38b01b3009b9af7f97cd18086c5bbf96f5693"
 dependencies = [
  "embassy-executor-timer-queue",
  "heapless",
+]
+
+[[package]]
+name = "embassy-usb"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a25746d8b152b72fbf2a217f489a083dbbe243f281f09184a1f2cfbe9bbb245f"
+dependencies = [
+ "bitflags",
+ "embassy-futures",
+ "embassy-net-driver-channel",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb-driver",
+ "embedded-io-async 0.7.0",
+ "heapless",
+]
+
+[[package]]
+name = "embassy-usb-dfu"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e36d3678d16e1e71b052d00f7518620b5839a878f2bdab2019b81d984fb2a74f"
+dependencies = [
+ "bitflags",
+ "embassy-boot",
+ "embassy-futures",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-storage",
 ]
 
 [[package]]

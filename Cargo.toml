@@ -9,7 +9,7 @@ exclude = [
 
 [package]
 name = "embassy-boot-ch32"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # `u32::is_multiple_of()` (used in the partition asserts) is stable since 1.87,
 # which is above the 1.85 that edition 2024 and the `cargo::error=` in `build.rs`

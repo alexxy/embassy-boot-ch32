@@ -47,6 +47,17 @@
 //! unsafe { loader.load(embassy_boot_ch32::active_start()) }
 //! ```
 //!
+//! The [repository](https://github.com/alexxy/embassy-boot-ch32) contains a
+//! complete example pair: a blocking
+//! [bootloader](https://github.com/alexxy/embassy-boot-ch32/tree/main/examples/bootloader)
+//! and an embassy
+//! [application](https://github.com/alexxy/embassy-boot-ch32/tree/main/examples/application),
+//! documented in
+//! its [README](https://github.com/alexxy/embassy-boot-ch32/blob/main/README.md)
+//! (chip matrix, partition maps, serial console and USB DFU transports). The
+//! examples are standalone workspaces, so they are not part of these docs and
+//! every link here points at GitHub.
+//!
 //! [`embassy-boot-stm32`]: https://docs.rs/embassy-boot-stm32
 //! [ch32-hal]: https://github.com/ch32-rs/ch32-hal
 

@@ -2,7 +2,7 @@
 
 [package]
 name = "bootloader"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "embassy-boot bootloader example for the WCH CH32V2/CH32V3 parts"
@@ -23,15 +23,31 @@ embassy-boot-ch32 = { path = "../.." }
 embassy-sync = "0.8.0"
 qingke-rt = "0.7"
 
+# Only pulled in by the `transport-usb` build; the serial bootloader links none
+# of this and stays plain blocking code.
+embassy-futures = { version = "0.1.2", optional = true }
+embassy-usb = { version = "0.6.0", default-features = false, optional = true }
+embassy-usb-dfu = { version = "0.3.0", default-features = false, features = [
+    "dfu",
+], optional = true }
+
 [features]
 # Exactly one chip feature has to be enabled: `build.rs` resolves it to a
 # partition map in `../../partition-map` and to the target the part needs, and
 # forwards it to the matching `ch32-hal` part feature.
 #
+# Exactly one `transport-*` feature has to be enabled as well; `transport-usb`
+# is only available on the parts listed in the README.
+#
 # Build another part with
 # `cargo build --release --no-default-features --features <part> --target <target>`,
 # see the table in the README.
-default = ["ch32v305rbt6"]
+default = ["ch32v305rbt6", "transport-uart"]
+
+# Receives the image over the USART1 console.
+transport-uart = []
+# Serves the image over USB DFU 1.1 (`dfu-util`).
+transport-usb = ["dep:embassy-futures", "dep:embassy-usb", "dep:embassy-usb-dfu"]
 
 # CH32V203, riscv32imc-unknown-none-elf
 ch32v203c8t6 = ["ch32-hal/ch32v203c8t6"]

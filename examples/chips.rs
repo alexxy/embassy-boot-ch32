@@ -10,7 +10,9 @@
 //
 // The partition maps live in `../partition-map` and are named after the
 // geometry (`flash<nominal application flash>-ram<sram>.x`), because several
-// parts share one geometry.
+// parts share one geometry. The USB bootloader needs a bigger bootloader
+// partition, so parts with a usable USB controller get a second map with a
+// `-usb` suffix.
 
 /// One selectable part.
 pub struct Chip {
@@ -22,6 +24,13 @@ pub struct Chip {
     /// The rust target the part is built for. Note that the CH32V2 parts have
     /// no `F` extension.
     pub target: &'static str,
+    /// The `ch32-hal` USB controller of the part: `""`, `"usbd"`, `"otg_fs"` or
+    /// `"usbhs"`. Empty when the part only has the `usb/v2fs` block, for which
+    /// `ch32-hal` implements no driver.
+    pub usb: &'static str,
+    /// The partition map used by the `transport-usb` bootloader, empty when the
+    /// part cannot host a USB bootloader.
+    pub map_usb: &'static str,
 }
 
 const IMC: &str = "riscv32imc-unknown-none-elf";
@@ -32,37 +41,54 @@ const FLASH128K_RAM32K: &str = "flash128k-ram32k.x";
 const FLASH128K_RAM64K: &str = "flash128k-ram64k.x";
 const FLASH256K_RAM64K: &str = "flash256k-ram64k.x";
 
+const FLASH128K_RAM32K_USB: &str = "flash128k-ram32k-usb.x";
+const FLASH128K_RAM64K_USB: &str = "flash128k-ram64k-usb.x";
+const FLASH256K_RAM64K_USB: &str = "flash256k-ram64k-usb.x";
+
 pub const CHIPS: &[Chip] = &[
     // CH32V203 (QingKe V4B, no FPU, 256 byte flash pages)
     Chip {
         part: "ch32v203c8t6",
         map: FLASH64K_RAM20K,
         target: IMC,
+        usb: "usbd",
+        map_usb: "",
     },
     Chip {
         part: "ch32v203c8u6",
         map: FLASH64K_RAM20K,
         target: IMC,
+        usb: "usbd",
+        map_usb: "",
     },
+    // The only CH32V203 without a USB controller at all.
     Chip {
         part: "ch32v203f8p6",
         map: FLASH64K_RAM20K,
         target: IMC,
+        usb: "",
+        map_usb: "",
     },
     Chip {
         part: "ch32v203f8u6",
         map: FLASH64K_RAM20K,
         target: IMC,
+        usb: "usbd",
+        map_usb: "",
     },
     Chip {
         part: "ch32v203g8r6",
         map: FLASH64K_RAM20K,
         target: IMC,
+        usb: "usbd",
+        map_usb: "",
     },
     Chip {
         part: "ch32v203k8t6",
         map: FLASH64K_RAM20K,
         target: IMC,
+        usb: "usbd",
+        map_usb: "",
     },
     // NOTE: CH32V203RBT6 is deliberately absent. It is the only CH32V203 part
     // with a 32-bit general purpose timer (TIM5, a `GPTM32` in ch32-metapac),
@@ -76,74 +102,107 @@ pub const CHIPS: &[Chip] = &[
         part: "ch32v208cbu6",
         map: FLASH128K_RAM64K,
         target: IMC,
+        usb: "usbd",
+        map_usb: FLASH128K_RAM64K_USB,
     },
     Chip {
         part: "ch32v208gbu6",
         map: FLASH128K_RAM64K,
         target: IMC,
+        usb: "usbd",
+        map_usb: FLASH128K_RAM64K_USB,
     },
     Chip {
         part: "ch32v208rbt6",
         map: FLASH128K_RAM64K,
         target: IMC,
+        usb: "usbd",
+        map_usb: FLASH128K_RAM64K_USB,
     },
     Chip {
         part: "ch32v208wbu6",
         map: FLASH128K_RAM64K,
         target: IMC,
+        usb: "usbd",
+        map_usb: FLASH128K_RAM64K_USB,
     },
-    // CH32V303 (QingKe V4F)
+    // CH32V303 (QingKe V4F). The `usb/v2fs` block of this family has no driver
+    // in ch32-hal, so none of these parts can do USB.
     Chip {
         part: "ch32v303cbt6",
         map: FLASH128K_RAM32K,
         target: IMFC,
+        usb: "",
+        map_usb: "",
     },
     Chip {
         part: "ch32v303rbt6",
         map: FLASH128K_RAM32K,
         target: IMFC,
+        usb: "",
+        map_usb: "",
     },
     Chip {
         part: "ch32v303rct6",
         map: FLASH256K_RAM64K,
         target: IMFC,
+        usb: "",
+        map_usb: "",
     },
     Chip {
         part: "ch32v303vct6",
         map: FLASH256K_RAM64K,
         target: IMFC,
+        usb: "",
+        map_usb: "",
     },
-    // CH32V305 (QingKe V4F, USB OTG HS)
+    // CH32V305 (QingKe V4F, USB OTG HS).
+    //
+    // `ch32v305rbt6` and the CH32V307 parts have both OTG_FS and USBHS; OTG_FS
+    // is preferred because that is the controller on the ISP/USB-C connector of
+    // the nanoCH32V305, so one cable does both flashing and DFU.
     Chip {
         part: "ch32v305fbp6",
         map: FLASH128K_RAM32K,
         target: IMFC,
+        usb: "usbhs",
+        map_usb: FLASH128K_RAM32K_USB,
     },
     Chip {
         part: "ch32v305gbu6",
         map: FLASH128K_RAM32K,
         target: IMFC,
+        usb: "usbhs",
+        map_usb: FLASH128K_RAM32K_USB,
     },
     Chip {
         part: "ch32v305rbt6",
         map: FLASH128K_RAM32K,
         target: IMFC,
+        usb: "otg_fs",
+        map_usb: FLASH128K_RAM32K_USB,
     },
     // CH32V307 (QingKe V4F, Ethernet)
     Chip {
         part: "ch32v307rct6",
         map: FLASH256K_RAM64K,
         target: IMFC,
+        usb: "otg_fs",
+        map_usb: FLASH256K_RAM64K_USB,
     },
     Chip {
         part: "ch32v307vct6",
         map: FLASH256K_RAM64K,
         target: IMFC,
+        usb: "otg_fs",
+        map_usb: FLASH256K_RAM64K_USB,
     },
     Chip {
         part: "ch32v307wcu6",
         map: FLASH256K_RAM64K,
         target: IMFC,
+        usb: "otg_fs",
+        map_usb: FLASH256K_RAM64K_USB,
     },
 ];
 

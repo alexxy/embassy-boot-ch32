@@ -9,12 +9,52 @@ include!("../chips.rs");
 /// The region this binary is placed in.
 const REGION: &str = "BOOTLOADER";
 
+/// The update transport selected by the `transport-*` features.
+#[derive(Clone, Copy, PartialEq)]
+enum Transport {
+    Uart,
+    Usb,
+}
+
 fn main() {
     let chip = selected("examples/bootloader");
     check_target(chip);
 
+    let transport = selected_transport("examples/bootloader");
+
+    // A USB bootloader needs a bigger bootloader partition than a serial one,
+    // so parts that support it are linked against a second map.
+    let map = match transport {
+        Transport::Uart => chip.map,
+        Transport::Usb => {
+            if chip.map_usb.is_empty() {
+                panic!(
+                    "examples/bootloader: {part} does not support the `transport-usb` feature ({}). \
+                     Parts without a `ch32-hal` USB driver, and the 64 KiB CH32V203 parts, are \
+                     serial only; build with `--features {part}` instead.",
+                    if chip.usb.is_empty() {
+                        "it has no USB driver in ch32-hal"
+                    } else {
+                        "its flash is too small for a USB bootloader"
+                    },
+                    part = chip.part,
+                );
+            }
+            chip.map_usb
+        }
+    };
+
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+    // Which USB controller the source has to drive. Declared unconditionally so
+    // that `cfg(usb_*)` never trips `unexpected_cfgs` in a serial build.
+    for cfg in ["usb_usbd", "usb_otg_fs", "usb_usbhs"] {
+        println!("cargo::rustc-check-cfg=cfg({cfg})");
+    }
+    if transport == Transport::Usb {
+        println!("cargo::rustc-cfg=usb_{}", chip.usb);
+    }
 
     // `link.x` (provided by qingke-rt) does `INCLUDE memory.x`, so we generate a
     // `memory.x` that pulls in the partition map for the selected chip and
@@ -30,7 +70,7 @@ fn main() {
          REGION_ALIAS(\"REGION_BSS\", RAM)\n\
          REGION_ALIAS(\"REGION_HEAP\", RAM)\n\
          REGION_ALIAS(\"REGION_STACK\", RAM)\n",
-        map = chip.map,
+        map = map,
     );
     write_if_changed(&out_dir.join("memory.x"), memory_x.as_bytes());
 
@@ -44,7 +84,7 @@ fn main() {
          pub const PARTITION_MAP: &str = \"{map}\";\n",
         part = chip.part,
         name = chip.part.to_uppercase(),
-        map = chip.map,
+        map = map,
     );
     write_if_changed(&out_dir.join("chip.rs"), chip_rs.as_bytes());
 
@@ -61,11 +101,33 @@ fn main() {
     println!("cargo:rerun-if-changed=../chips.rs");
     println!(
         "cargo:rerun-if-changed={}",
-        manifest
-            .join("../../partition-map")
-            .join(chip.map)
-            .display()
+        manifest.join("../../partition-map").join(map).display()
     );
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TRANSPORT_UART");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TRANSPORT_USB");
+}
+
+/// The one `transport-*` feature that is enabled.
+///
+/// Both transports could coexist in principle (a board with a console and a USB
+/// socket), but they do not fit in the bootloader partition together, and a
+/// build that silently picks one of two enabled transports is a bad way to find
+/// that out.
+fn selected_transport(example: &str) -> Transport {
+    let uart = std::env::var("CARGO_FEATURE_TRANSPORT_UART").is_ok_and(|v| v == "1");
+    let usb = std::env::var("CARGO_FEATURE_TRANSPORT_USB").is_ok_and(|v| v == "1");
+
+    match (uart, usb) {
+        (true, false) => Transport::Uart,
+        (false, true) => Transport::Usb,
+        (false, false) => panic!(
+            "{example}: no transport feature enabled. Enable `transport-uart` or `transport-usb`, \
+             the package enables `transport-uart` by default."
+        ),
+        (true, true) => panic!(
+            "{example}: `transport-uart` and `transport-usb` are both enabled; enable exactly one."
+        ),
+    }
 }
 
 /// Writes `path` only when the contents differ, so that touching a generated

@@ -138,6 +138,8 @@ jobs:
 
       # `--locked` keeps the git dependency on `ch32-hal` pinned to the revision
       # in the examples' `Cargo.lock`, so a new upstream commit cannot break CI.
+      # Builds both transports; parts without a `-usb` partition map only get
+      # the serial one (skipped by the script itself).
       - name: Build and check
         env:
           CARGO_ARGS: --locked
@@ -178,3 +180,16 @@ jobs:
       - name: Clippy
         working-directory: examples/${{ matrix.example }}
         run: cargo clippy --release --locked -- -D warnings
+
+      # The default part (CH32V305RBT6) supports the USB DFU transport, and the
+      # `transport-usb`/`usb-dfu` code is cfg-ed out of the default build, so it
+      # needs its own lint permutation.
+      - name: Clippy (usb)
+        working-directory: examples/${{ matrix.example }}
+        run: |
+          case "${{ matrix.example }}" in
+            bootloader) features=ch32v305rbt6,transport-usb ;;
+            application) features=ch32v305rbt6,usb-dfu ;;
+          esac
+          cargo clippy --release --locked --no-default-features \
+            --features "$features" -- -D warnings

@@ -13,6 +13,38 @@ fn main() {
     let chip = selected("examples/application");
     check_target(chip);
 
+    // An application with the runtime DFU interface must be linked against the
+    // same map as the USB bootloader it talks to, which is the `-usb` map of
+    // the part.
+    let usb_dfu = std::env::var("CARGO_FEATURE_USB_DFU").is_ok_and(|v| v == "1");
+    let map = if usb_dfu {
+        if chip.map_usb.is_empty() {
+            panic!(
+                "examples/application: {part} does not support the `usb-dfu` feature ({}). Build \
+                 without it to get the plain serial application.",
+                if chip.usb.is_empty() {
+                    "it has no USB driver in ch32-hal"
+                } else {
+                    "its flash is too small for a USB bootloader"
+                },
+                part = chip.part,
+            );
+        }
+        chip.map_usb
+    } else {
+        chip.map
+    };
+
+    // Which USB controller the `usb-dfu` build has to drive. Declared
+    // unconditionally so that `cfg(usb_*)` never trips `unexpected_cfgs` in a
+    // build without the feature.
+    for cfg in ["usb_usbd", "usb_otg_fs", "usb_usbhs"] {
+        println!("cargo::rustc-check-cfg=cfg({cfg})");
+    }
+    if usb_dfu {
+        println!("cargo::rustc-cfg=usb_{}", chip.usb);
+    }
+
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
@@ -30,7 +62,7 @@ fn main() {
          REGION_ALIAS(\"REGION_BSS\", RAM)\n\
          REGION_ALIAS(\"REGION_HEAP\", RAM)\n\
          REGION_ALIAS(\"REGION_STACK\", RAM)\n",
-        map = chip.map,
+        map = map,
     );
     write_if_changed(&out_dir.join("memory.x"), memory_x.as_bytes());
 
@@ -44,7 +76,7 @@ fn main() {
          pub const PARTITION_MAP: &str = \"{map}\";\n",
         part = chip.part,
         name = chip.part.to_uppercase(),
-        map = chip.map,
+        map = map,
     );
     write_if_changed(&out_dir.join("chip.rs"), chip_rs.as_bytes());
 
@@ -61,11 +93,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../chips.rs");
     println!(
         "cargo:rerun-if-changed={}",
-        manifest
-            .join("../../partition-map")
-            .join(chip.map)
-            .display()
+        manifest.join("../../partition-map").join(map).display()
     );
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_USB_DFU");
 }
 
 /// Writes `path` only when the contents differ, so that touching a generated
