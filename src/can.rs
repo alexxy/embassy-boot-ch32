@@ -1,5 +1,6 @@
 //! The wire protocol of the CAN-bus firmware update transport, as specified by
-//! [`docs/can-update-protocol.md`] in the repository.
+//! [`docs/can-update-protocol.md`](https://github.com/alexxy/embassy-boot-ch32/blob/main/docs/can-update-protocol.md)
+//! in the repository.
 //!
 //! This module is a pure, dependency-free codec: it knows the CAN ID layout,
 //! the control frame opcodes, the response framing and the image CRC, but
