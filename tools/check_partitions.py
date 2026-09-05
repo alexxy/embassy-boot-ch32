@@ -4,9 +4,9 @@
 Every `*.x` file in there is used by both examples, so a map that does not
 satisfy embassy-boot's `assert_partitions()` is a bug that would otherwise only
 show up as a panic on the board. The file name carries the geometry of the chip
-it was written for (`flash<app flash>-ram<sram>[-usb].x`, the `-usb` maps
-belong to the USB DFU bootloader), which is what the total partition sizes
-are checked against.
+it was written for (`flash<app flash>-ram<sram>[-usb|-can].x`, the `-usb` and
+`-can` maps belong to the USB DFU and CAN update bootloaders), which is what
+the total partition sizes are checked against.
 
 Usage:
 
@@ -31,9 +31,9 @@ REGIONS = ("BOOTLOADER", "ACTIVE", "DFU", "BOOTLOADER_STATE")
 REGION_RE = re.compile(
     r"^\s*(\w+)\s*\(\w+\)\s*:\s*ORIGIN\s*=\s*(0x[0-9a-fA-F]+)\s*,\s*LENGTH\s*=\s*(\d+)([KkMm]?)\s*$"
 )
-# A `-usb` suffix marks the maps used by the (bigger) USB DFU bootloader; the
-# geometry the name carries is unchanged.
-NAME_RE = re.compile(r"^flash(\d+)([KkMm])-ram(\d+)([KkMm])(-usb)?\.x$")
+# A `-usb` or `-can` suffix marks the maps used by the (bigger) USB DFU and CAN
+# update bootloaders; the geometry the name carries is unchanged.
+NAME_RE = re.compile(r"^flash(\d+)([KkMm])-ram(\d+)([KkMm])(-(?:usb|can))?\.x$")
 
 
 def scaled(value, suffix):
@@ -100,7 +100,7 @@ def check(path):
     if not match:
         return (
             [
-                "file name must be flash<n><K|M>-ram<n><K|M>[-usb].x so the geometry can be "
+                "file name must be flash<n><K|M>-ram<n><K|M>[-usb|-can].x so the geometry can be "
                 "checked"
             ],
             {},

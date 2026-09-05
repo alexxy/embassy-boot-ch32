@@ -13,10 +13,29 @@ fn main() {
     let chip = selected("examples/application");
     check_target(chip);
 
-    // An application with the runtime DFU interface must be linked against the
-    // same map as the USB bootloader it talks to, which is the `-usb` map of
-    // the part.
+    // A runtime update interface must be linked against the same map as the
+    // bootloader it talks to: the `-usb` map for the `usb-dfu` interface, the
+    // `-can` map for the `can-runtime` listener.
     let usb_dfu = std::env::var("CARGO_FEATURE_USB_DFU").is_ok_and(|v| v == "1");
+    let can_runtime = std::env::var("CARGO_FEATURE_CAN_RUNTIME").is_ok_and(|v| v == "1");
+
+    if usb_dfu && can_runtime {
+        panic!(
+            "examples/application: `usb-dfu` and `can-runtime` cannot be combined; they are \
+             linked against different partition maps. Enable exactly one."
+        );
+    }
+
+    // The pin remap option only means something to the CAN listener; catching
+    // it here gives a better message than silently building PA11/PA12 CAN.
+    let pb8_pb9 = std::env::var("CARGO_FEATURE_CAN_PB8_PB9").is_ok_and(|v| v == "1");
+    if pb8_pb9 && !can_runtime {
+        panic!(
+            "examples/application: the `can-pb8-pb9` feature only applies to `can-runtime`; it is \
+             enabled without it."
+        );
+    }
+
     let map = if usb_dfu {
         if chip.map_usb.is_empty() {
             panic!(
@@ -31,6 +50,20 @@ fn main() {
             );
         }
         chip.map_usb
+    } else if can_runtime {
+        if chip.map_can.is_empty() {
+            panic!(
+                "examples/application: {part} does not support the `can-runtime` feature ({}). \
+                 Build without it to get the plain serial application.",
+                if chip.can {
+                    "its flash is too small for a CAN bootloader"
+                } else {
+                    "it has no CAN controller"
+                },
+                part = chip.part,
+            );
+        }
+        chip.map_can
     } else {
         chip.map
     };
@@ -96,6 +129,8 @@ fn main() {
         manifest.join("../../partition-map").join(map).display()
     );
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_USB_DFU");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CAN_RUNTIME");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CAN_PB8_PB9");
 }
 
 /// Writes `path` only when the contents differ, so that touching a generated

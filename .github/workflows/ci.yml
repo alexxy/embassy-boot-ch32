@@ -138,8 +138,8 @@ jobs:
 
       # `--locked` keeps the git dependency on `ch32-hal` pinned to the revision
       # in the examples' `Cargo.lock`, so a new upstream commit cannot break CI.
-      # Builds both transports; parts without a `-usb` partition map only get
-      # the serial one (skipped by the script itself).
+      # Builds all three transports; parts without a `-usb` or `-can` partition
+      # map only get the ones they support (skipped by the script itself).
       - name: Build and check
         env:
           CARGO_ARGS: --locked
@@ -190,6 +190,17 @@ jobs:
           case "${{ matrix.example }}" in
             bootloader) features=ch32v305rbt6,transport-usb ;;
             application) features=ch32v305rbt6,usb-dfu ;;
+          esac
+          cargo clippy --release --locked --no-default-features \
+            --features "$features" -- -D warnings
+
+      # Same for the CAN transport, also cfg-ed out of the default build.
+      - name: Clippy (can)
+        working-directory: examples/${{ matrix.example }}
+        run: |
+          case "${{ matrix.example }}" in
+            bootloader) features=ch32v305rbt6,transport-can ;;
+            application) features=ch32v305rbt6,can-runtime ;;
           esac
           cargo clippy --release --locked --no-default-features \
             --features "$features" -- -D warnings

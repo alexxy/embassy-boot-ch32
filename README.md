@@ -13,7 +13,8 @@ linker-script driven partition map, and a pair of
 [bootloader](examples/bootloader) / [application](examples/application) examples
 that build for 20 parts across 5 chip families. The update transport is
 selectable: a serial console on every part, USB DFU 1.1 on the ten parts that
-have a working `ch32-hal` USB controller. Tested on real hardware on the
+have a working `ch32-hal` USB controller, and CAN bus on the thirteen parts
+that have a CAN controller. Tested on real hardware on the
 **CH32V305RBT6**.
 
 ```sh
@@ -60,6 +61,13 @@ CH32V203 parts that have a USBD controller only have 64 KiB of flash, too little
 for the 32 KiB USB bootloader, and the `usb/v2fs` block of the CH32V303 family
 has no driver in `ch32-hal`, so both families stay serial-only.
 
+The thirteen parts with an on-chip CAN controller — the four CH32V208 parts,
+the four CH32V303 parts, the CH32V305 GBU6 / RBT6 and the three CH32V307 parts
+(CH32V305FBP6 has no CAN controller) — can also take updates over **CAN bus**
+(see [CAN bus](#can-bus)), which is built for reprogramming one specific node
+on a multi-node bus. The CH32V203 family again stays out: with 64 KiB of flash
+there is no room for the 32 KiB CAN bootloader.
+
 ### Not (yet) supported
 
 A runtime bootloader needs a working flash *driver*, and `ch32-hal` only has one
@@ -95,19 +103,22 @@ Two further exclusions:
 ```
 .
 ├── src/lib.rs                  the adapter crate
+├── src/can.rs                  CAN update protocol codec (tested on the host)
 ├── build.rs                    rejects `log` and `defmt` at the same time
 ├── partition-map/
 │   ├── flash64k-ram20k.x       one map per (flash, RAM) geometry
 │   ├── flash128k-ram32k.x
 │   ├── flash128k-ram64k.x
 │   ├── flash256k-ram64k.x
-│   └── *-usb.x                 bigger-bootloader variants for USB DFU
+│   ├── *-usb.x                 bigger-bootloader variants for USB DFU
+│   └── *-can.x                 bigger-bootloader variants for CAN updates
 ├── examples/
 │   ├── chips.rs                chip -> map -> target table, included by both build.rs
-│   ├── bootloader/             blocking bootloader, serial console or USB DFU
+│   ├── bootloader/             blocking bootloader: serial, USB DFU or CAN
 │   └── application/            embassy application with mark_booted()/mark_dfu()
 ├── tools/
 │   ├── serial_update.py        host side of the serial update protocol
+│   ├── can_update.py           host side of the CAN update protocol
 │   ├── check_size.sh           partition fit + entry point guard
 │   ├── check_partitions.py     validates the partition maps statically
 │   └── build_matrix.sh         builds (and checks) every supported chip
@@ -143,14 +154,19 @@ spare block.
 | `flash128k-ram32k-usb.x` | 128 KiB | 32 KiB | 32 KiB `0x0800_0000` | 32 KiB `0x0800_8000` | 56 KiB `0x0801_0000` | 8 KiB `0x0801_E000` |
 | `flash128k-ram64k-usb.x` | 128 KiB | 64 KiB | 32 KiB `0x0800_0000` | 32 KiB `0x0800_8000` | 56 KiB `0x0801_0000` | 8 KiB `0x0801_E000` |
 | `flash256k-ram64k-usb.x` | 256 KiB | 64 KiB | 32 KiB `0x0800_0000` | 96 KiB `0x0800_8000` | 112 KiB `0x0802_0000` | 16 KiB `0x0803_C000` |
+| `flash128k-ram32k-can.x` | 128 KiB | 32 KiB | 32 KiB `0x0800_0000` | 32 KiB `0x0800_8000` | 56 KiB `0x0801_0000` | 8 KiB `0x0801_E000` |
+| `flash128k-ram64k-can.x` | 128 KiB | 64 KiB | 32 KiB `0x0800_0000` | 32 KiB `0x0800_8000` | 56 KiB `0x0801_0000` | 8 KiB `0x0801_E000` |
+| `flash256k-ram64k-can.x` | 256 KiB | 64 KiB | 32 KiB `0x0800_0000` | 96 KiB `0x0800_8000` | 112 KiB `0x0802_0000` | 16 KiB `0x0803_C000` |
 
-The `-usb` maps give the bootloader 32 KiB instead of 16 KiB (embassy-usb plus
-embassy-usb-dfu does not fit into the serial bootloader's partition) and pay for
-it out of `ACTIVE`. A board has to be flashed with a matching set: a bootloader
-and an application linked against the *same* map, because they disagree about
-where `ACTIVE` starts otherwise. `build.rs` of both examples picks the `-usb`
-map automatically for `transport-usb` / `usb-dfu` builds and rejects the feature
-on parts whose `map_usb` is empty.
+The `-usb` and `-can` maps give the bootloader 32 KiB instead of 16 KiB
+(embassy-usb plus embassy-usb-dfu — and the CAN driver plus the CAN update
+protocol codec — do not fit into the serial bootloader's partition) and pay
+for it out of `ACTIVE`. A board has to be flashed with a matching set: a
+bootloader and an application linked against the *same* map, because they
+disagree about where `ACTIVE` starts otherwise. `build.rs` of both examples
+picks the `-usb` map automatically for `transport-usb` / `usb-dfu` builds and
+the `-can` map for `transport-can` / `can-runtime` builds, rejecting the
+feature on parts whose `map_usb` / `map_can` is empty.
 
 `tools/check_partitions.py` validates every map in `partition-map/` (contiguity,
 page alignment, the embassy-boot state capacity inequality, total size, RAM size
@@ -212,8 +228,10 @@ cargo build --release --no-default-features --features ch32v208rbt6 \
 ```
 
 The bootloader additionally needs exactly one `transport-*` feature
-(`transport-uart` by default); the application gets an optional `usb-dfu`
-feature. The USB variants of both are covered in [USB DFU](#usb-dfu).
+(`transport-uart` by default, or `transport-usb` / `transport-can`); the
+application gets optional `usb-dfu` and `can-runtime` features, of which at
+most one can be enabled. The USB variants are covered in [USB DFU](#usb-dfu),
+the CAN ones in [CAN bus](#can-bus).
 
 `build.rs` refuses to continue if the feature and the target disagree, so a
 `--target` mistake is a short error message instead of a link failure. The
@@ -222,9 +240,10 @@ output binaries are called `bootloader` and `application`.
 To build (and size check) everything:
 
 ```sh
-tools/build_matrix.sh                      # every chip, both examples, both transports
+tools/build_matrix.sh                      # every chip, both examples, every transport
 tools/build_matrix.sh --example bootloader # one example
 tools/build_matrix.sh --transport usb      # only the USB DFU builds
+tools/build_matrix.sh --transport can      # only the CAN builds
 tools/build_matrix.sh --chip ch32v307rct6 --bin-dir dist
 ```
 
@@ -253,7 +272,7 @@ partition map it uses.
 
 The first time, flash both binaries: the bootloader at `0x0800_0000` and the
 application at `0x0800_4000` (where it is linked; `0x0800_8000` for a `-usb`
-map, see [USB DFU](#usb-dfu)). A blank state partition reads
+or `-can` map, see [USB DFU](#usb-dfu) and [CAN bus](#can-bus)). A blank state partition reads
 as `0xFF`, which embassy-boot treats as `State::Boot`, so the bootloader will
 simply boot whatever is in `ACTIVE`.
 
@@ -433,6 +452,101 @@ is wired to **OTG_FS**, the same controller the on-chip ISP monitor uses, so
   takes 8–16 KiB away from `ACTIVE`; `tools/check_size.sh` and CI keep both
   variants inside their maps.
 
+## CAN bus
+
+The thirteen parts with an on-chip CAN controller (see
+[Supported chips](#supported-chips)) can take updates over CAN instead of —
+or next to — the serial console. The protocol is specified in
+[docs/can-update-protocol.md](docs/can-update-protocol.md); the frame-level
+codec (`embassy_boot_ch32::can`, in `src/can.rs`) is shared by the firmware,
+and `tools/can_update.py` mirrors its constants on the host.
+
+Unlike serial or USB, which are point-to-point, a CAN bus usually carries many
+nodes, and an update targets exactly one of them. Every node is given a 7-bit
+`NODE_ID`: requests arrive on `0x400 + (node << 2) + sub` and answers go out
+on `0x600 + ...`, so the controller's hardware acceptance filters only wake
+the addressed node. As a second guard — two boards may end up sharing a
+`NODE_ID` — the `ENTER_UPDATE` command carries the first 7 bytes of the
+target's factory 96-bit unique device ID, which a node checks against its own
+before doing anything. The application listens on the bus; a targeted
+`ENTER_UPDATE` makes it answer, reset, and hand over to the bootloader, which
+also polls the bus at boot and performs the flash transfer.
+
+There are two halves, each behind its own feature:
+
+* a **`transport-can` [bootloader](examples/bootloader)** serves `PING`,
+  `GET_INFO`, `SESSION_OPEN`, `BEGIN`, the page data frames, `QUERY`, `ABORT`
+  and `FINISH`, writes the image to the `DFU` partition, verifies the CRC32
+  and resets into the swap (the serial console keeps working next to it),
+* a **`can-runtime` [application](examples/application)** answers `PING` and
+  `GET_INFO` and jumps into the bootloader on a matching `ENTER_UPDATE`.
+
+```sh
+cd examples/bootloader
+cargo build --release --no-default-features --features ch32v305rbt6,transport-can \
+    --target riscv32imfc-unknown-none-elf
+
+cd ../application
+cargo build --release --no-default-features --features ch32v305rbt6,can-runtime \
+    --target riscv32imfc-unknown-none-elf
+```
+
+Both sides are linked against the `-can` maps automatically (see
+[Partition maps](#partition-maps)), but they also have to agree on `NODE_ID`
+and the bit rate: both are single constants at the top of `src/can_update.rs`
+and `src/can_runtime.rs`, `DEFAULT_NODE_ID = 1` and 1 Mbit/s by default.
+`transport-usb` + `transport-can` and `usb-dfu` + `can-runtime` are rejected
+by `build.rs`.
+
+### Wiring
+
+The examples use CAN1 on **PA11 (RX) / PA12 (TX)**, which on the
+nanoCH32V305 are also the USB-C data pins — either leave the USB cable
+unplugged during CAN updates, or build both binaries with the `can-pb8-pb9`
+feature, which moves CAN1 to **PB8 (RX) / PB9 (TX)** (the REMAP1 pin set).
+
+The chip only has the CAN *controller*; an external 3.3 V transceiver is
+needed (a 5 V TJA1050 will work on a 5 V bus, but on 3.3 V use e.g. a
+SN65HVD230), wired TX→TXD-adjacent pin, RX→RXD-adjacent pin, CANH↔CANH and
+CANL↔CANL to the host adapter, with 120 Ω termination at both ends of the
+bus.
+
+### Flashing over CAN
+
+On a Linux host with any SocketCAN adapter:
+
+```sh
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+
+llvm-objcopy -O binary \
+  examples/application/target/riscv32imfc-unknown-none-elf/release/application \
+  application.bin
+python3 tools/can_update.py --interface socketcan --channel can0 \
+    --bitrate 1000000 --node 1 application.bin
+```
+
+The tool needs [`python-can`](https://pypi.org/project/python-can/). It
+discovers the node with a `GET_INFO` broadcast on the functional ID, moves it
+from the application into the bootloader if needed, then streams the image in
+256-byte pages with per-page ACKs; if a page is lost it asks the node where it
+stands (`QUERY`) and resumes from there instead of restarting. Pass
+`--uid <24 hex digits>` to pin the update to one specific chip. The same
+rollback rules as for serial and USB apply (the application calls
+`mark_booted()`; a bad image is reverted).
+
+### CAN caveats
+
+* **The bootloader busy-polls** the bus with 1 ms sleeps between `try_recv`
+  attempts, in the same blocking style as the USB bootloader; the
+  application-side listener is async and shares the console loop.
+* **A `-can` build shrinks the application** like a `-usb` one (32 KiB
+  bootloader); the CAN bootloader is ~14 KiB of the 32 KiB partition and CI
+  keeps it inside.
+* **Session timeout.** A half-dead session (host vanishes mid-transfer) is
+  dropped by the bootloader after 5 s of bus silence; the host simply
+  re-opens a session and `QUERY` finds the resume offset.
+
 ## Caveats
 
 * **Only the CH32V2/V3 flash controller is implemented upstream.** Everything
@@ -499,8 +613,8 @@ on pull requests and manually:
 | --- | --- | --- |
 | `crate` | stable, nightly | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the same for `--features log` and `--features defmt` separately, `cargo doc` with `RUSTDOCFLAGS=-D warnings`, `python3 tools/check_partitions.py` |
 | `chips` | — | turns `examples/chips.rs` into the chip matrix for the next job |
-| `firmware` (one job per part) | nightly | `tools/build_matrix.sh --chip <part>`: builds both transports of the bootloader and the application for the target that part needs (the USB ones only where a `-usb` map exists), checks every binary with `tools/check_size.sh`, uploads `dist/<part>/*.bin` as `firmware-<part>` |
-| `examples-lint` | nightly | `cargo fmt --check` and `cargo clippy --release -D warnings` for both examples, in the default (serial) and the USB variant (default part) |
+| `firmware` (one job per part) | nightly | `tools/build_matrix.sh --chip <part>`: builds every transport of the bootloader and the application for the target that part needs (the USB/CAN ones only where a `-usb`/`-can` map exists), checks every binary with `tools/check_size.sh`, uploads `dist/<part>/*.bin` as `firmware-<part>` |
+| `examples-lint` | nightly | `cargo fmt --check` and `cargo clippy --release -D warnings` for both examples, in the default (serial), the USB and the CAN variant (default part) |
 
 A few things worth knowing:
 
@@ -526,11 +640,10 @@ version.
 
 ## Roadmap
 
-* **CAN-bus updates.** A draft protocol specification for flashing one specific
-  node on a multi-node CAN bus (7-bit NodeID filtering plus verification against
-  the factory 96-bit unique device ID) lives in
-  [docs/can-update-protocol.md](docs/can-update-protocol.md). No implementation
-  has started; feedback on the draft is very welcome.
+* **CAN-bus updates** are implemented (see [CAN bus](#can-bus)); feedback on
+  the protocol specification
+  ([docs/can-update-protocol.md](docs/can-update-protocol.md)) is still very
+  welcome.
 * Re-enable **CH32V203RBT6** once the upstream `ch32-hal` timer-variant bug is
   fixed (see [Not (yet) supported](#not-yet-supported)).
 

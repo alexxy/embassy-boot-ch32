@@ -8,7 +8,9 @@
 #
 # Each part is built with the serial transport; parts that have a `-usb`
 # partition map in `examples/chips.rs` are additionally built with the USB DFU
-# transport (bootloader `transport-usb`, application `usb-dfu`).
+# transport (bootloader `transport-usb`, application `usb-dfu`), and parts
+# that have a `-can` map with the CAN transport (bootloader `transport-can`,
+# application `can-runtime`).
 #
 # Examples:
 #
@@ -36,17 +38,18 @@ chips=()
 usage() {
     cat >&2 <<'EOF'
 usage: build_matrix.sh [--example {bootloader,application,all}]
-                       [--transport {uart,usb,all}]
+                       [--transport {uart,usb,can,all}]
                        [--chip <part>] [--list] [--bin-dir <dir>]
 
   --example      which example to build (default: all)
   --transport    which update transport to build (default: all; parts without
-                 a `-usb` partition map only have uart)
+                 a `-usb` or `-can` partition map only have uart)
   --chip         only build this part; repeatable (default: every part)
   --list         print the chip table and exit
   --bin-dir      write raw binary images to this directory, named
                  <part>-<example>.bin for the serial builds and
-                 <part>-<example>-usb.bin for the USB DFU ones
+                 <part>-<example>-usb.bin / <part>-<example>-can.bin for the
+                 USB DFU and CAN ones
 EOF
     exit 2
 }
@@ -69,7 +72,7 @@ while [ $# -gt 0 ]; do
             ;;
         --transport)
             case "$2" in
-                uart | usb | all) want_transport="$2" ;;
+                uart | usb | can | all) want_transport="$2" ;;
                 *) usage ;;
             esac
             shift 2
@@ -90,10 +93,10 @@ if [ ! -f "$chips_rs" ]; then
     exit 1
 fi
 
-# Turns `examples/chips.rs` into `part target usb-map` lines, one per
-# selectable part. The USB map column is empty for parts that cannot host a
-# USB bootloader (`map_usb: ""`). `map_usb` is the last field of the struct
-# literal, which is where each line is emitted.
+# Turns `examples/chips.rs` into `part target usb-map can-map` lines, one per
+# selectable part. The map columns are empty for parts that cannot host the
+# respective bootloader (`map_usb: ""`, `map_can: ""`). `map_can` is the last
+# field of the struct literal, which is where each line is emitted.
 chip_table() {
     awk '
         /^const [A-Za-z0-9_]+: &str = "/ {
@@ -109,6 +112,8 @@ chip_table() {
             sub(/^.*part: "/, "", line)
             sub(/".*/, "", line)
             part = line
+            usbmap = ""
+            canmap = ""
         }
         /target: / && part != "" {
             line = $0
@@ -122,14 +127,23 @@ chip_table() {
             sub(/,.*/, "", line)
             gsub(/[ "]/, "", line)
             usbmap = (line == "") ? "" : ((line in consts) ? consts[line] : line)
-            print part, target, usbmap
+        }
+        /map_can: / && part != "" {
+            line = $0
+            sub(/^.*map_can: /, "", line)
+            sub(/,.*/, "", line)
+            gsub(/[ "]/, "", line)
+            canmap = (line == "") ? "" : ((line in consts) ? consts[line] : line)
+            # `-` stands in for an empty map so that `read` cannot collapse the
+            # columns; the loop below turns it back into an empty string.
+            print part, target, (usbmap == "" ? "-" : usbmap), (canmap == "" ? "-" : canmap)
             part = ""
         }
     ' "$chips_rs"
 }
 
 if [ -n "${want_list:-}" ]; then
-    printf '%-18s %-31s %s\n' PART TARGET USB_MAP
+    printf '%-18s %-31s %-35s %s\n' PART TARGET USB_MAP CAN_MAP
     chip_table
     exit 0
 fi
@@ -152,13 +166,19 @@ fi
 failures=()
 built=0
 
-while read -r part target usbmap; do
+while read -r part target usbmap canmap; do
+    [ "$usbmap" = "-" ] && usbmap=""
+    [ "$canmap" = "-" ] && canmap=""
     selected "$part" || continue
 
-    for transport in uart usb; do
+    for transport in uart usb can; do
         [ "$want_transport" = all ] || [ "$want_transport" = "$transport" ] || continue
         if [ "$transport" = usb ] && [ -z "$usbmap" ]; then
             echo "skipping $part usb: no ch32-hal USB driver or too little flash"
+            continue
+        fi
+        if [ "$transport" = can ] && [ -z "$canmap" ]; then
+            echo "skipping $part can: no CAN controller or too little flash"
             continue
         fi
 
@@ -169,15 +189,18 @@ while read -r part target usbmap; do
         esac
 
         label="$part-$example"
-        # The serial builds keep the plain <part>-<example> name; the USB DFU
-        # ones are distinguishable by their -usb suffix.
+        # The serial builds keep the plain <part>-<example> name; the DFU and
+        # CAN ones are distinguishable by their suffix.
         [ "$transport" = usb ] && label="$label-usb"
+        [ "$transport" = can ] && label="$label-can"
 
         case "$example/$transport" in
             bootloader/uart) features="$part,transport-uart" ;;
             bootloader/usb) features="$part,transport-usb" ;;
+            bootloader/can) features="$part,transport-can" ;;
             application/uart) features="$part" ;;
             application/usb) features="$part,usb-dfu" ;;
+            application/can) features="$part,can-runtime" ;;
         esac
 
         echo "====================================================================="

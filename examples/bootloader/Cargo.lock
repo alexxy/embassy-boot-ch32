@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "bootloader"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ch32-hal",
  "embassy-boot-ch32",
@@ -60,6 +60,7 @@ dependencies = [
  "embassy-sync",
  "embassy-usb",
  "embassy-usb-dfu",
+ "embedded-can",
  "qingke-rt",
 ]
 
@@ -197,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "embassy-boot-ch32"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "embassy-boot",
  "embedded-storage",

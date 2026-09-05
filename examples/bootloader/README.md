@@ -15,8 +15,8 @@ chip matrix and the partition geometry live in the
 3. Otherwise it prints a banner on USART1 (115200 8N1, **PA9** TX / **PA10** RX)
    and waits up to 3 seconds for a key. No key press boots the active partition
    immediately.
-4. A key press enters the console (`transport-uart`) or holds the board in a
-   DFU session (`transport-usb`).
+4. A key press enters the console (`transport-uart`) or holds the board in an
+   update session (`transport-usb`, `transport-can`).
 
 A `prepare` failure (corrupted state partition) also falls into an update
 session rather than hanging.
@@ -39,11 +39,17 @@ cargo build --release --no-default-features --features ch32v208rbt6 \
 
 # USB DFU bootloader (only the ten `-usb` parts, see the root README)
 cargo build --release --no-default-features --features ch32v305rbt6,transport-usb
+
+# CAN bus bootloader (only the thirteen parts with CAN, see the root README)
+cargo build --release --no-default-features --features ch32v305rbt6,transport-can
 ```
 
 `transport-usb` links against the part's `-usb` partition map, which gives the
 bootloader 32 KiB instead of 16 KiB; building `transport-usb` for a part
 without a USB driver, or with too little flash, fails the build on purpose.
+`transport-can` likewise links against the part's `-can` map and fails the
+build on parts without a CAN controller; its optional `can-pb8-pb9` feature
+(see below) is only valid together with it.
 
 ## Serial console (`transport-uart`, the default)
 
@@ -101,17 +107,69 @@ Worth knowing:
 * there is no interactive console over USB: a key press during the grace window
   simply prints the partition info and enters the DFU session.
 
+## CAN bus (`transport-can`)
+
+With `transport-can` the USART keeps the banner, the grace window and the
+partition info, but the image arrives over classic CAN, speaking
+[docs/can-update-protocol.md](../../docs/can-update-protocol.md) (host side:
+[`../../tools/can_update.py`](../../tools/can_update.py)). The frame codec is
+[`embassy_boot_ch32::can`](../../src/can.rs); the driver is `ch32-hal`'s
+non-blocking bxCAN one, polled once per millisecond — no executor, no
+interrupts and, unlike the USB build, no clock changes.
+
+CAN1 uses **PA11 (RX) / PA12 (TX)**; on boards where those pins carry USB
+data — the nanoCH32V305 USB-C socket — either keep the cable unplugged or
+enable `can-pb8-pb9` to use the REMAP1 pin set **PB8 (RX) / PB9 (TX)** (the
+same feature has to be enabled in the application build). An external 3.3 V
+transceiver (e.g. SN65HVD230) and bus termination are required; the chip has
+neither.
+
+Two constants at the top of `src/can_update.rs` must agree with the
+[application example's](../application) `src/can_runtime.rs` and with the host
+tool: `NODE_ID` (default `1`) and `CAN_BITRATE` (default 1 Mbit/s).
+
+```sh
+# Linux host with any SocketCAN adapter
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+python3 ../../tools/can_update.py --interface socketcan --channel can0 \
+    --bitrate 1000000 --node 1 application.bin
+```
+
+The session starts by itself when the state partition says `DfuDetach` — which
+is how a `can-runtime` application (or `mark_dfu()`, or the `d` key of a
+`transport-uart` build) lands a board here — and also when any key is pressed
+during the 3 s grace window. Image pages are 256 bytes, each acknowledged after
+it is written; `FINISH` verifies the CRC32, `mark_updated()` records the swap
+and the reset boots the new image with the usual rollback rules.
+
+Worth knowing:
+
+* the receive loop busy-polls with 1 ms sleeps, which keeps the flow simple
+  and the console responsive at the cost of throughput below the 1 Mbit/s
+  wire speed,
+* only *targeted* frames are acted upon; functional (broadcast) frames get a
+  `GET_INFO` answer spread apart by a per-node delay derived from the unique
+  device ID, and `ENTER_UPDATE` carries the first 7 bytes of the target UID so
+  a node never jumps unless it is the one being addressed,
+* a session is dropped after 5 s of bus silence; the host finds the resume
+  offset with `QUERY`.
+
 ## Pairing rules
 
 The bootloader and the application must be linked against the **same**
 partition map — they read the partition positions from the same
 `__bootloader_*` linker symbols, so a mismatch boots into garbage. Concretely:
 
-* `transport-uart` bootloader ↔ application built without `usb-dfu` (plain map,
-  `ACTIVE` at `0x0800_4000`),
+* `transport-uart` bootloader ↔ application built without `usb-dfu` and
+  `can-runtime` (plain map, `ACTIVE` at `0x0800_4000`),
 * `transport-usb` bootloader ↔ application built against the same `-usb` map;
   only then does the `usb-dfu` runtime interface of the
-  [application example](../application) have a bootloader to reset into.
+  [application example](../application) have a bootloader to reset into,
+* `transport-can` bootloader ↔ application built with `can-runtime` against
+  the same `-can` map (and the same `can-pb8-pb9` choice and `NODE_ID`); only
+  then does the bus listener of the [application example](../application) have
+  a CAN bootloader to reset into.
 
 ## Checking the size
 
@@ -124,10 +182,10 @@ in the ELF itself and also verifies the entry point):
     --role bootloader --label ch32v305rbt6-bootloader
 ```
 
-The serial build sits at ~86 % of its 16 KiB partition and the USB build at
-~70 % of its 32 KiB one as of this commit; CI keeps both in check. If it stops
-fitting, shrink it or move `ACTIVE`/`DFU` up in the map — do not move only the
-bootloader.
+The serial build sits at ~86 % of its 16 KiB partition, the USB build at ~70 %
+and the CAN build at ~43 % of their 32 KiB ones as of this commit; CI keeps all
+three in check. If it stops fitting, shrink it or move `ACTIVE`/`DFU` up in the
+map — do not move only the bootloader.
 
 ## Deliberate simplifications
 

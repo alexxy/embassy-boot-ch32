@@ -2,7 +2,7 @@
 
 [package]
 name = "bootloader"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "embassy-boot bootloader example for the WCH CH32V2/CH32V3 parts"
@@ -30,6 +30,9 @@ embassy-usb = { version = "0.6.0", default-features = false, optional = true }
 embassy-usb-dfu = { version = "0.3.0", default-features = false, features = [
     "dfu",
 ], optional = true }
+# Only pulled in by the `transport-can` build: `ch32-hal` re-exports its CAN
+# driver but not the `embedded-can` blocking traits it implements.
+embedded-can = { version = "0.4.1", optional = true }
 
 [features]
 # Exactly one chip feature has to be enabled: `build.rs` resolves it to a
@@ -37,7 +40,8 @@ embassy-usb-dfu = { version = "0.3.0", default-features = false, features = [
 # forwards it to the matching `ch32-hal` part feature.
 #
 # Exactly one `transport-*` feature has to be enabled as well; `transport-usb`
-# is only available on the parts listed in the README.
+# and `transport-can` are only available on the parts that have the controller
+# (and enough flash), see the README.
 #
 # Build another part with
 # `cargo build --release --no-default-features --features <part> --target <target>`,
@@ -48,6 +52,13 @@ default = ["ch32v305rbt6", "transport-uart"]
 transport-uart = []
 # Serves the image over USB DFU 1.1 (`dfu-util`).
 transport-usb = ["dep:embassy-futures", "dep:embassy-usb", "dep:embassy-usb-dfu"]
+# Receives the image over classic CAN at 1 Mbit/s, speaking the protocol of
+# `docs/can-update-protocol.md` (host side: `tools/can_update.py`).
+transport-can = ["dep:embedded-can"]
+# Uses the CAN1 remap 1 pins PB8 (RX) / PB9 (TX) instead of the default PA11
+# (RX) / PA12 (TX), which the USB controller shares. Only valid together with
+# `transport-can`.
+can-pb8-pb9 = []
 
 # CH32V203, riscv32imc-unknown-none-elf
 ch32v203c8t6 = ["ch32-hal/ch32v203c8t6"]

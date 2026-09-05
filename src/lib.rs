@@ -54,7 +54,8 @@
 //! [application](https://github.com/alexxy/embassy-boot-ch32/tree/main/examples/application),
 //! documented in
 //! its [README](https://github.com/alexxy/embassy-boot-ch32/blob/main/README.md)
-//! (chip matrix, partition maps, serial console and USB DFU transports). The
+//! (chip matrix, partition maps, serial console, USB DFU and CAN-bus
+//! transports). The
 //! examples are standalone workspaces, so they are not part of these docs and
 //! every link here points at GitHub.
 //!
@@ -71,6 +72,8 @@ pub use embassy_boot::{
     FirmwareState, FirmwareUpdater, FirmwareUpdaterConfig, FirmwareUpdaterError, State,
 };
 pub use embedded_storage;
+
+pub mod can;
 
 /// Address of the beginning of the internal flash array as seen by the core.
 ///

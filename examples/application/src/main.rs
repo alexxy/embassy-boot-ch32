@@ -28,6 +28,13 @@
 //! partition for DFU and resets, exactly like `d` does here over the serial
 //! console. A binary built with `usb-dfu` is linked against the `-usb`
 //! partition map and only pairs with a `transport-usb` bootloader.
+//!
+//! The `can-runtime` feature instead adds a listener on the CAN bus (see
+//! `src/can_runtime.rs`): `tools/can_update.py` finds the board with a
+//! broadcast `GET_INFO` and sends a targeted `ENTER_UPDATE`, which marks the
+//! state partition for DFU and resets into a `transport-can` bootloader, again
+//! exactly like `d`. A binary built with `can-runtime` is linked against the
+//! `-can` partition map; `usb-dfu` and `can-runtime` cannot be combined.
 
 #![no_std]
 #![no_main]
@@ -53,6 +60,8 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Timer;
 use panic_halt as _;
 
+#[cfg(feature = "can-runtime")]
+mod can_runtime;
 #[cfg(feature = "usb-dfu")]
 mod usb_runtime;
 
@@ -119,6 +128,23 @@ async fn main(spawner: Spawner) -> ! {
         dm: p.PB6,
     };
 
+    // Likewise for the CAN listener: taken here, initialised below, and a
+    // plain build never touches the CAN hardware. The default pins are CAN1
+    // remap 0 (PA11 RX / PA12 TX); `can-pb8-pb9` uses remap 1 (PB8 / PB9)
+    // instead, e.g. when remap 0 is needed for USB.
+    #[cfg(all(feature = "can-runtime", not(feature = "can-pb8-pb9")))]
+    let can_peripherals = can_runtime::CanPeripherals {
+        can: p.CAN1,
+        rx: p.PA11,
+        tx: p.PA12,
+    };
+    #[cfg(all(feature = "can-runtime", feature = "can-pb8-pb9"))]
+    let can_peripherals = can_runtime::CanPeripherals {
+        can: p.CAN1,
+        rx: p.PB8,
+        tx: p.PB9,
+    };
+
     let mut config = Config::default();
     config.baudrate = 115200;
     // Note the argument order: the rx pin (PA10) comes first.
@@ -182,13 +208,37 @@ async fn main(spawner: Spawner) -> ! {
         usb_runtime::run(&flash, usb).await
     }
 
+    // Bring up the CAN listener once at startup; an init failure is a build
+    // or wiring problem (an unachievable bitrate, no pins), not a transient
+    // bus fault, so report it and run without the listener rather than retry.
+    #[cfg(feature = "can-runtime")]
+    let mut can = match can_runtime::CanRuntime::new(can_peripherals) {
+        Ok(can) => {
+            console.line("can update listener active");
+            Some(can)
+        }
+        Err(()) => {
+            console.line("can init failed, listener disabled");
+            None
+        }
+    };
+
     #[cfg(not(feature = "usb-dfu"))]
     {
         console.line("commands: [i] info  [d] request firmware update");
 
         // Polling loop: the uart is read non blocking, so the blink task keeps
-        // running while we wait for a key.
+        // running while we wait for a key. The CAN listener rides the same
+        // loop; its idle sleep of 2 ms is also the bus poll cadence, fast
+        // enough for a stop-and-wait host at 1 Mbit/s.
         loop {
+            #[cfg(feature = "can-runtime")]
+            if let Some(can) = can.as_mut()
+                && can.poll(&mut console).await
+            {
+                request_dfu(&flash, &mut console);
+            }
+
             match rx.nb_read() {
                 Ok(byte) => {
                     let _ = console.0.blocking_write(&[byte, b'\r', b'\n']);

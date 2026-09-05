@@ -2,7 +2,7 @@
 
 [package]
 name = "application"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Example embassy application for the embassy-boot CH32 example"
@@ -33,6 +33,9 @@ embassy-usb = { version = "0.6.0", default-features = false, optional = true }
 embassy-usb-dfu = { version = "0.3.0", default-features = false, features = [
     "application",
 ], optional = true }
+# Only pulled in by the `can-runtime` feature: `ch32-hal` re-exports its CAN
+# driver but not the `embedded-can` traits it implements.
+embedded-can = { version = "0.4.1", optional = true }
 embedded-storage = "0.3.1"
 panic-halt = "1.0"
 qingke-rt = "0.7"
@@ -48,6 +51,12 @@ qingke-rt = "0.7"
 # `transport-usb` bootloader and is only available on the parts listed in the
 # README.
 #
+# An application built with `can-runtime` listens on the CAN bus for the
+# `ENTER_UPDATE` request of `docs/can-update-protocol.md` and resets into a
+# `transport-can` bootloader when its UID matches; it is linked against the
+# same `-can` partition map. `usb-dfu` and `can-runtime` cannot be combined
+# (they need different partition maps).
+#
 # Build another part with
 # `cargo build --release --no-default-features --features <part> --target <target>`,
 # see the table in the README.
@@ -55,6 +64,12 @@ default = ["ch32v305rbt6"]
 
 # DFU runtime interface over USB (`dfu-util -e` to enter the bootloader).
 usb-dfu = ["dep:embassy-usb", "dep:embassy-usb-dfu"]
+# CAN-bus update listener (`tools/can_update.py` resets the board into the CAN
+# bootloader with one CAN frame).
+can-runtime = ["dep:embedded-can"]
+# Uses the CAN1 remap 1 pins PB8 (RX) / PB9 (TX) instead of the default PA11
+# (RX) / PA12 (TX). Only valid together with `can-runtime`.
+can-pb8-pb9 = []
 
 # CH32V203, riscv32imc-unknown-none-elf
 ch32v203c8t6 = ["ch32-hal/ch32v203c8t6"]

@@ -14,6 +14,7 @@ const REGION: &str = "BOOTLOADER";
 enum Transport {
     Uart,
     Usb,
+    Can,
 }
 
 fn main() {
@@ -23,7 +24,9 @@ fn main() {
     let transport = selected_transport("examples/bootloader");
 
     // A USB bootloader needs a bigger bootloader partition than a serial one,
-    // so parts that support it are linked against a second map.
+    // so parts that support it are linked against a second map. The CAN
+    // transport keeps the serial geometry but needs the CAN controller, so it
+    // gets its own map as well.
     let map = match transport {
         Transport::Uart => chip.map,
         Transport::Usb => {
@@ -41,6 +44,21 @@ fn main() {
                 );
             }
             chip.map_usb
+        }
+        Transport::Can => {
+            if chip.map_can.is_empty() {
+                panic!(
+                    "examples/bootloader: {part} does not support the `transport-can` feature \
+                     ({}); build with `--features {part}` for the serial bootloader.",
+                    if chip.can {
+                        "its flash is too small for a CAN bootloader"
+                    } else {
+                        "it has no CAN controller"
+                    },
+                    part = chip.part,
+                );
+            }
+            chip.map_can
         }
     };
 
@@ -105,27 +123,42 @@ fn main() {
     );
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TRANSPORT_UART");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TRANSPORT_USB");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TRANSPORT_CAN");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CAN_PB8_PB9");
 }
 
 /// The one `transport-*` feature that is enabled.
 ///
-/// Both transports could coexist in principle (a board with a console and a USB
-/// socket), but they do not fit in the bootloader partition together, and a
-/// build that silently picks one of two enabled transports is a bad way to find
-/// that out.
+/// All three transports could coexist in principle (a board with a console, a
+/// USB socket and a CAN transceiver), but they do not fit in the bootloader
+/// partition together, and a build that silently picks one of several enabled
+/// transports is a bad way to find that out.
 fn selected_transport(example: &str) -> Transport {
     let uart = std::env::var("CARGO_FEATURE_TRANSPORT_UART").is_ok_and(|v| v == "1");
     let usb = std::env::var("CARGO_FEATURE_TRANSPORT_USB").is_ok_and(|v| v == "1");
+    let can = std::env::var("CARGO_FEATURE_TRANSPORT_CAN").is_ok_and(|v| v == "1");
 
-    match (uart, usb) {
-        (true, false) => Transport::Uart,
-        (false, true) => Transport::Usb,
-        (false, false) => panic!(
-            "{example}: no transport feature enabled. Enable `transport-uart` or `transport-usb`, \
-             the package enables `transport-uart` by default."
+    // The pin remap option only means something to the CAN transport; catching
+    // it here gives a better message than silently building PA11/PA12 CAN.
+    let pb8_pb9 = std::env::var("CARGO_FEATURE_CAN_PB8_PB9").is_ok_and(|v| v == "1");
+    if pb8_pb9 && !can {
+        panic!(
+            "{example}: the `can-pb8-pb9` feature only applies to `transport-can`; it is enabled \
+             without it."
+        );
+    }
+
+    match (uart, usb, can) {
+        (true, false, false) => Transport::Uart,
+        (false, true, false) => Transport::Usb,
+        (false, false, true) => Transport::Can,
+        (false, false, false) => panic!(
+            "{example}: no transport feature enabled. Enable `transport-uart`, `transport-usb` \
+             or `transport-can`; the package enables `transport-uart` by default."
         ),
-        (true, true) => panic!(
-            "{example}: `transport-uart` and `transport-usb` are both enabled; enable exactly one."
+        _ => panic!(
+            "{example}: more than one transport feature enabled; enable exactly one of \
+             `transport-uart`, `transport-usb` and `transport-can`."
         ),
     }
 }

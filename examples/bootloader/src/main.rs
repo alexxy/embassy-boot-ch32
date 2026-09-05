@@ -26,13 +26,19 @@
 //!
 //! # Transports
 //!
-//! Exactly one of `transport-uart` and `transport-usb` is built.
+//! Exactly one of `transport-uart`, `transport-usb` and `transport-can` is
+//! built.
 //!
 //! With `transport-usb` the USART stays what the bootloader talks to, but only
 //! for the banner, the grace window and the panic message; the image itself is
 //! served over USB DFU 1.1 to `dfu-util` instead of over the console. The USB
 //! peripherals are moved aside at startup and touched only once a session is
 //! entered, so an ordinary boot does not initialise the controller at all.
+//!
+//! With `transport-can` the same holds for the CAN controller: the image is
+//! received over classic CAN at 1 Mbit/s, speaking the protocol of
+//! `docs/can-update-protocol.md` (host side: `tools/can_update.py`). The
+//! console still carries the banner and the progress lines.
 //!
 //! # Update protocol
 //!
@@ -77,6 +83,8 @@ use embassy_boot_ch32::{
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
+#[cfg(feature = "transport-can")]
+mod can_update;
 #[cfg(feature = "transport-usb")]
 mod usb_dfu;
 
@@ -247,6 +255,23 @@ fn main() -> ! {
         dm: p.PB6,
     };
 
+    // The CAN controller and its pins, moved out the same way: a board that
+    // merely boots never initialises it. The default pins are the CAN1 remap 0
+    // pair PA11 (RX) / PA12 (TX), which is also the USB data pair, so a board
+    // that uses both builds the `can-pb8-pb9` remap instead.
+    #[cfg(all(feature = "transport-can", not(feature = "can-pb8-pb9")))]
+    let can = can_update::CanPeripherals {
+        can: p.CAN1,
+        rx: p.PA11,
+        tx: p.PA12,
+    };
+    #[cfg(all(feature = "transport-can", feature = "can-pb8-pb9"))]
+    let can = can_update::CanPeripherals {
+        can: p.CAN1,
+        rx: p.PB8,
+        tx: p.PB9,
+    };
+
     let mut config = usart::Config::default();
     config.baudrate = 115200;
     // Note the argument order: the rx pin (PA10) comes first.
@@ -258,9 +283,12 @@ fn main() -> ! {
 
     let flash = FlashMutex::new(RefCell::new(CoarseFlash(Flash::new_blocking(p.FLASH))));
 
-    // The USB build never iterates this loop (every path either boots or
-    // diverges into a DFU session), which the lint below notices.
-    #[cfg_attr(feature = "transport-usb", allow(clippy::never_loop))]
+    // The USB and CAN builds never iterate this loop (every path either boots
+    // or diverges into a session), which the lint below notices.
+    #[cfg_attr(
+        any(feature = "transport-usb", feature = "transport-can"),
+        allow(clippy::never_loop)
+    )]
     loop {
         // `prepare` performs a pending swap/revert; it borrows the flash device
         // only for as long as the config lives.
@@ -281,6 +309,8 @@ fn main() -> ! {
                 // `return` is needed (nor wanted: it would be unreachable code).
                 #[cfg(feature = "transport-usb")]
                 usb_dfu::session(&flash, usb);
+                #[cfg(feature = "transport-can")]
+                can_update::session(&flash, &mut console, &mut delay, can);
             }
         };
 
@@ -296,6 +326,8 @@ fn main() -> ! {
 
             #[cfg(feature = "transport-usb")]
             usb_dfu::session(&flash, usb);
+            #[cfg(feature = "transport-can")]
+            can_update::session(&flash, &mut console, &mut delay, can);
         }
 
         cline!(
@@ -306,6 +338,8 @@ fn main() -> ! {
         console.line("press a key: [b] boot  [d] update  [i] info  [?] help");
         #[cfg(feature = "transport-usb")]
         console.line("press a key to stay in the bootloader and wait for dfu-util");
+        #[cfg(feature = "transport-can")]
+        console.line("press a key to stay in the bootloader and wait for a CAN host");
 
         let mut key = None;
         let mut waited = 0;
@@ -325,14 +359,21 @@ fn main() -> ! {
             console_loop(&flash, &mut console, &mut delay, Some(b));
         }
 
-        // There is no interactive console over USB, so holding the board here is
-        // all the choice a key gets to make.
+        // There is no interactive console over USB or CAN, so holding the board
+        // here is all the choice a key gets to make.
         #[cfg(feature = "transport-usb")]
         if let Some(b) = key {
             console.echo(b);
             console.write("\r\n");
             print_info(&mut console);
             usb_dfu::session(&flash, usb);
+        }
+        #[cfg(feature = "transport-can")]
+        if let Some(b) = key {
+            console.echo(b);
+            console.write("\r\n");
+            print_info(&mut console);
+            can_update::session(&flash, &mut console, &mut delay, can);
         }
 
         console.line("booting active partition");

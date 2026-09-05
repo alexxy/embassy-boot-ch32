@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "application"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ch32-hal",
  "embassy-boot-ch32",
@@ -22,6 +22,7 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "embassy-usb-dfu",
+ "embedded-can",
  "embedded-storage",
  "panic-halt",
  "qingke-rt",
@@ -264,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "embassy-boot-ch32"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "embassy-boot",
  "embedded-storage",

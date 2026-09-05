@@ -10,9 +10,9 @@
 //
 // The partition maps live in `../partition-map` and are named after the
 // geometry (`flash<nominal application flash>-ram<sram>.x`), because several
-// parts share one geometry. The USB bootloader needs a bigger bootloader
-// partition, so parts with a usable USB controller get a second map with a
-// `-usb` suffix.
+// parts share one geometry. The USB and CAN bootloader need a bigger
+// bootloader partition than the serial one, so parts that can host them get a
+// second map with a `-usb` or `-can` suffix.
 
 /// One selectable part.
 pub struct Chip {
@@ -31,6 +31,13 @@ pub struct Chip {
     /// The partition map used by the `transport-usb` bootloader, empty when the
     /// part cannot host a USB bootloader.
     pub map_usb: &'static str,
+    /// The part has a bxCAN controller that `ch32-hal` drives. The CH32V203F8P6,
+    /// CH32V203F8U6 and CH32V305FBP6 have no CAN peripheral at all.
+    pub can: bool,
+    /// The partition map used by the `transport-can` bootloader, empty when the
+    /// part has no CAN controller or too little flash to pair a CAN bootloader
+    /// with a usable application partition.
+    pub map_can: &'static str,
 }
 
 const IMC: &str = "riscv32imc-unknown-none-elf";
@@ -45,6 +52,10 @@ const FLASH128K_RAM32K_USB: &str = "flash128k-ram32k-usb.x";
 const FLASH128K_RAM64K_USB: &str = "flash128k-ram64k-usb.x";
 const FLASH256K_RAM64K_USB: &str = "flash256k-ram64k-usb.x";
 
+const FLASH128K_RAM32K_CAN: &str = "flash128k-ram32k-can.x";
+const FLASH128K_RAM64K_CAN: &str = "flash128k-ram64k-can.x";
+const FLASH256K_RAM64K_CAN: &str = "flash256k-ram64k-can.x";
+
 pub const CHIPS: &[Chip] = &[
     // CH32V203 (QingKe V4B, no FPU, 256 byte flash pages)
     Chip {
@@ -53,6 +64,10 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: "",
+        can: true,
+        // 64 KiB of flash cannot hold a 32 KiB bootloader and still leave room
+        // for an active and a dfu partition.
+        map_can: "",
     },
     Chip {
         part: "ch32v203c8u6",
@@ -60,6 +75,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: "",
+        can: true,
+        map_can: "",
     },
     // The only CH32V203 without a USB controller at all.
     Chip {
@@ -68,6 +85,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "",
         map_usb: "",
+        can: false,
+        map_can: "",
     },
     Chip {
         part: "ch32v203f8u6",
@@ -75,6 +94,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: "",
+        can: false,
+        map_can: "",
     },
     Chip {
         part: "ch32v203g8r6",
@@ -82,6 +103,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: "",
+        can: true,
+        map_can: "",
     },
     Chip {
         part: "ch32v203k8t6",
@@ -89,6 +112,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: "",
+        can: true,
+        map_can: "",
     },
     // NOTE: CH32V203RBT6 is deliberately absent. It is the only CH32V203 part
     // with a 32-bit general purpose timer (TIM5, a `GPTM32` in ch32-metapac),
@@ -104,6 +129,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: FLASH128K_RAM64K_USB,
+        can: true,
+        map_can: FLASH128K_RAM64K_CAN,
     },
     Chip {
         part: "ch32v208gbu6",
@@ -111,6 +138,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: FLASH128K_RAM64K_USB,
+        can: true,
+        map_can: FLASH128K_RAM64K_CAN,
     },
     Chip {
         part: "ch32v208rbt6",
@@ -118,6 +147,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: FLASH128K_RAM64K_USB,
+        can: true,
+        map_can: FLASH128K_RAM64K_CAN,
     },
     Chip {
         part: "ch32v208wbu6",
@@ -125,6 +156,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMC,
         usb: "usbd",
         map_usb: FLASH128K_RAM64K_USB,
+        can: true,
+        map_can: FLASH128K_RAM64K_CAN,
     },
     // CH32V303 (QingKe V4F). The `usb/v2fs` block of this family has no driver
     // in ch32-hal, so none of these parts can do USB.
@@ -134,6 +167,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "",
         map_usb: "",
+        can: true,
+        map_can: FLASH128K_RAM32K_CAN,
     },
     Chip {
         part: "ch32v303rbt6",
@@ -141,6 +176,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "",
         map_usb: "",
+        can: true,
+        map_can: FLASH128K_RAM32K_CAN,
     },
     Chip {
         part: "ch32v303rct6",
@@ -148,6 +185,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "",
         map_usb: "",
+        can: true,
+        map_can: FLASH256K_RAM64K_CAN,
     },
     Chip {
         part: "ch32v303vct6",
@@ -155,6 +194,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "",
         map_usb: "",
+        can: true,
+        map_can: FLASH256K_RAM64K_CAN,
     },
     // CH32V305 (QingKe V4F, USB OTG HS).
     //
@@ -167,6 +208,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "usbhs",
         map_usb: FLASH128K_RAM32K_USB,
+        can: false,
+        map_can: "",
     },
     Chip {
         part: "ch32v305gbu6",
@@ -174,6 +217,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "usbhs",
         map_usb: FLASH128K_RAM32K_USB,
+        can: true,
+        map_can: FLASH128K_RAM32K_CAN,
     },
     Chip {
         part: "ch32v305rbt6",
@@ -181,6 +226,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "otg_fs",
         map_usb: FLASH128K_RAM32K_USB,
+        can: true,
+        map_can: FLASH128K_RAM32K_CAN,
     },
     // CH32V307 (QingKe V4F, Ethernet)
     Chip {
@@ -189,6 +236,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "otg_fs",
         map_usb: FLASH256K_RAM64K_USB,
+        can: true,
+        map_can: FLASH256K_RAM64K_CAN,
     },
     Chip {
         part: "ch32v307vct6",
@@ -196,6 +245,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "otg_fs",
         map_usb: FLASH256K_RAM64K_USB,
+        can: true,
+        map_can: FLASH256K_RAM64K_CAN,
     },
     Chip {
         part: "ch32v307wcu6",
@@ -203,6 +254,8 @@ pub const CHIPS: &[Chip] = &[
         target: IMFC,
         usb: "otg_fs",
         map_usb: FLASH256K_RAM64K_USB,
+        can: true,
+        map_can: FLASH256K_RAM64K_CAN,
     },
 ];
 

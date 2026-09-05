@@ -28,7 +28,8 @@ other boards) toggles every 500 ms from an embassy task.
    it prints `this was a fresh image, it is now marked as booted`.
 3. Spawns the blink task.
 4. Runs the console command loop — or, in a `usb-dfu` build, the DFU runtime
-   interface — while the blink task keeps running through the executor.
+   interface — while the blink task keeps running through the executor. A
+   `can-runtime` build keeps the console loop and polls the CAN bus from it.
 
 ## Feature selection
 
@@ -36,8 +37,10 @@ Exactly **one chip feature** has to be enabled (the default is
 `ch32v305rbt6`); `build.rs` resolves it to the partition map and the rust target
 (see [`../chips.rs`](../chips.rs)). The optional `usb-dfu` feature adds the DFU
 1.1 runtime interface and is only available on the ten parts that have a working
-`ch32-hal` USB controller (see the root README); on any other part the build
-fails on purpose.
+`ch32-hal` USB controller; the optional `can-runtime` feature adds the CAN bus
+update listener and is only available on the thirteen parts that have a CAN
+controller (see the root README). On any other part the build fails on
+purpose, and `usb-dfu` and `can-runtime` cannot be combined.
 
 ```sh
 # default: CH32V305RBT6, serial console
@@ -49,6 +52,9 @@ cargo build --release --no-default-features --features ch32v208rbt6 \
 
 # DFU runtime interface (only the ten `-usb` parts)
 cargo build --release --no-default-features --features ch32v305rbt6,usb-dfu
+
+# CAN update listener (only the thirteen parts with CAN)
+cargo build --release --no-default-features --features ch32v305rbt6,can-runtime
 ```
 
 A `usb-dfu` build is linked against the part's `-usb` partition map and runs the
@@ -93,10 +99,39 @@ Worth knowing:
 * the blink task keeps running while the interface is active; a USB cable that
   carries only power simply means no host ever detaches it.
 
+## CAN update listener (`can-runtime`)
+
+A `can-runtime` build keeps the serial console loop and additionally polls
+CAN1 from it — **PA11 (RX) / PA12 (TX)**, or **PB8 / PB9** with the
+`can-pb8-pb9` feature, which must match the [bootloader build](../bootloader);
+see its README for the transceiver and termination. On the bus
+([docs/can-update-protocol.md](../../docs/can-update-protocol.md)) it:
+
+* answers a targeted `PING` and any `GET_INFO` — including the functional
+  discovery broadcast, answered after a per-node delay derived from the unique
+  device ID so a bus full of nodes does not collide — reporting state `APP`,
+* on a targeted `ENTER_UPDATE` whose embedded UID prefix matches its own chip,
+  answers OK, then does exactly what the `d` key does: `mark_dfu()` and a
+  reset, ~5 ms later, into the `transport-can` bootloader,
+* ignores everything else; the flash transfer only ever happens in the
+  bootloader. See [`src/can_runtime.rs`](src/can_runtime.rs).
+
+So updating a running board is a single command from the host:
+
+```sh
+python3 ../../tools/can_update.py --interface socketcan --channel can0 \
+    --bitrate 1000000 --node 1 application.bin
+```
+
+`NODE_ID` and `CAN_BITRATE` at the top of `src/can_runtime.rs` must match the
+bootloader build and the host tool. Unlike `usb-dfu`, a `can-runtime` build
+needs no clock changes and coexists happily with the serial console: `d` still
+works, it just lands in the same CAN bootloader.
+
 ## First flash and pairing rules
 
 The application is linked into `ACTIVE`: at `0x0800_4000` for the plain maps and
-at `0x0800_8000` for the `-usb` maps. For the very first flash it has to be
+at `0x0800_8000` for the `-usb` and `-can` maps. For the very first flash it has to be
 flashed over ISP together with the bootloader (`wchisp`/`wlink` take the ELF and
 use its link addresses):
 
@@ -108,7 +143,9 @@ After that, updates go through the bootloader. The bootloader and the
 application must be linked against the **same** partition map, so the pair is:
 
 * plain application ↔ `transport-uart` bootloader,
-* `usb-dfu` application ↔ `transport-usb` bootloader.
+* `usb-dfu` application ↔ `transport-usb` bootloader,
+* `can-runtime` application ↔ `transport-can` bootloader (same `-can` map,
+  `can-pb8-pb9` choice, `NODE_ID` and bit rate).
 
 A mismatch boots into garbage: both binaries read the partition positions from
 the same `__bootloader_*` linker symbols.
@@ -126,5 +163,5 @@ itself):
 ```
 
 The plain build sits at ~24 % of its 48 KiB partition, the `usb-dfu` build at
-roughly 60 % of its 32 KiB one as of this commit; CI keeps every permutation of
-the chip matrix in check.
+roughly 60 % and the `can-runtime` build at ~44 % of their 32 KiB ones as of
+this commit; CI keeps every permutation of the chip matrix in check.

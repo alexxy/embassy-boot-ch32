@@ -1,10 +1,12 @@
-# CAN-Bus Firmware Update Protocol (draft)
+# CAN-Bus Firmware Update Protocol
 
-> **Status: draft for discussion.** This document describes a proposed protocol for
-> updating firmware over a CAN bus with `embassy-boot-ch32`. Nothing here is
-> implemented yet; the design is intentionally close to the existing USART/USB-DFU
-> flows so that the flash-side machinery (partition maps, `mark_updated()`,
-> swap/rollback) is reused unchanged.
+> **Status: implemented (v1).** The frame codec is `src/can.rs`
+> (`embassy_boot_ch32::can`, unit-tested), the node side is the bootloader
+> `transport-can` feature and the application `can-runtime` listener, and the
+> host side is `tools/can_update.py`. The design stayed close to the existing
+> USART/USB-DFU flows, so the flash-side machinery (partition maps,
+> `mark_updated()`, swap/rollback) is reused unchanged. Sections that the
+> implementation resolved one way out of several options say so explicitly.
 
 ## 1. Goals
 
@@ -31,9 +33,9 @@
 
 - Classic CAN 2.0A, nominal bitrate configurable; **1 Mbit/s** is the default and
   the reference timing.
-- Nodes use a standard `ch32-hal` CAN peripheral with one RX filter (see §4.3).
-- Host side: any socketCAN / USB-CAN adapter (PCAN, CANable, etc.). A reference
-  host tool is out of scope for this document.
+- Nodes use a standard `ch32-hal` CAN peripheral with RX filters (see §4.3).
+- Host side: any socketCAN / USB-CAN adapter (PCAN, CANable, etc.) driven through
+  python-can; the reference host tool is `tools/can_update.py`.
 
 ## 4. CAN ID allocation
 
@@ -102,7 +104,7 @@ Byte 0 is the command opcode. All multi-byte fields are little-endian.
 | Opcode | Name | Request payload | Accepted mode |
 |--------|------|-----------------|---------------|
 | `0x01` | `PING` | — | runtime listener / BL |
-| `0x02` | `ENTER_UPDATE` | `uid[0..12]` | runtime listener only |
+| `0x02` | `ENTER_UPDATE` | `uid[0..7]` | runtime listener only |
 | `0x10` | `SESSION_OPEN` | `nonce u32` | BL |
 | `0x11` | `SESSION_CLOSE` | — | BL |
 | `0x12` | `GET_INFO` | — | runtime listener / BL |
@@ -111,14 +113,18 @@ Byte 0 is the command opcode. All multi-byte fields are little-endian.
 | `0x30` | `FINISH` | `len u32`, `crc32 u32` | BL |
 | `0x31` | `QUERY` | — | BL |
 
-`ENTER_UPDATE` carries the full 12-byte UID (3 frames, or a 7-byte truncated UID
-prefix — see §13). Only the node whose UID matches sets the "enter bootloader"
-magic (the same mechanism the USART/USB transports use) and resets; all other
-nodes ignore the frame entirely. On functional addressing (NodeID 0) *every* node
-would enter the bootloader — reserved, not used in v1.
+`ENTER_UPDATE` carries a **7-byte UID prefix** (opcode + prefix fits exactly one
+frame; decided per §13.2). Only the node whose UID prefix matches sets the "enter
+bootloader" magic (the same mechanism the USART/USB transports use) and resets;
+all other nodes ignore the frame entirely. On functional addressing (NodeID 0)
+*every* node would enter the bootloader — reserved, not used in v1, and the
+runtime listener ignores functional `ENTER_UPDATE`.
 
 `GET_INFO` response: `protocol_version u8`, `state u8` (`0`=app, `1`=BL-idle,
-`2`=BL-receiving), `uid[0..12]`, `chip_id u32` (from `signature::chip_id()`).
+`2`=BL-receiving), `uid[0..12]`, `chip_id u32` (from `signature::chip_id()`). The
+18-byte payload does not fit a control frame, so it is sent as `⌈18/8⌉ = 3` data
+frames after the header; the header's `next_offset` field carries the payload
+length (`18`) so the receiver knows how many frames to expect.
 
 ### 6.2 Responses (dir = `0b11`, sub = 0)
 
@@ -130,23 +136,49 @@ Common header, then command-specific bytes:
 | 1 | `cmd` (echo) |
 | 2 | `status` (`0` = OK, else error) |
 | 3 | `err` (error detail code) |
-| 4–7 | `next_offset u32` (next expected image offset) |
+| 4–7 | `next_offset u32` (next expected image offset; reused as the payload length of a multi-frame `GET_INFO` response) |
+
+Every response echoes the answered command in byte 1, including the per-page
+ACKs of the data channel, which are sent as `OK` headers for `BEGIN`.
 
 ### 6.3 Data frames (sub = 1)
 
 Up to 8 raw image bytes, always sent at the exact `next_offset` the node expects
 (frames are implicitly addressed by offset; no sequence numbers in the frame —
-the stop-and-wait ACK *is* the sequence check). A frame arriving at an unexpected
-offset is NACK'ed with the expected offset, making retransmission idempotent.
+the stop-and-wait ACK *is* the sequence check). The node accumulates frames into
+a 256-byte page, programs the page and ACKs it; frames inside a page are
+answered with silence.
+
+Because frames carry no index, **the page is the unit of idempotency**: a page is
+either written and acknowledged, or the host repeats the whole page. Host
+recovery rule: on a lost ACK, `QUERY` for `next_offset`; if it is page-aligned,
+resume with that page; if it is not (the host's own state was inconsistent), the
+partial page cannot be resumed, so `ABORT` and restart the transfer from `BEGIN`.
+The node never reports a non-page-aligned offset while receiving, since it only
+advances `next_offset` after programming a page.
 
 ## 7. Session lifecycle
+
+A node still running the application is first detached into the bootloader:
+
+```
+ |  ENTER_UPDATE {uid[0..7]}           |   runtime listener, targeted only
+ |------------------------------------>|  UID prefix matches -> OK header, then
+ |  <ACK status=OK>                    |  mark DFU + system reset
+ |  (node silent; reappears as BL)     |
+```
+
+The update session itself:
 
 ```
 Host                                 Node (bootloader)
  |  SESSION_OPEN (nonce)               |
  |------------------------------------>|  one session at a time; reject if busy
  |  <ACK status=OK>                    |
+ |  <data frame: nonce echo>           |  proves the ACK belongs to this session
  |  BEGIN {len, crc32}                 |
+ |------------------------------------>|  validate len <= DFU size; erase DFU
+ |  <ACK next_offset=0>                |  (~ms for 48 KiB on CH32V3)
  |------------------------------------>|  validate len <= DFU size; erase DFU
  |  <ACK next_offset=0>                |  (~ms for 48 KiB on CH32V3)
  |                                     |
@@ -163,10 +195,16 @@ Host                                 Node (bootloader)
 
 - **Watchdog:** if no valid frame is seen for ~5 s mid-session, the node drops the
   session without touching the state/active partitions. The old image still boots.
+  The drop is announced in the one way a stop-and-wait host polls for: a `QUERY`
+  response with `status=error`, `err=timeout`.
 - **QUERY** returns `next_offset` at any time, letting a host resync after its own
-  state was lost (e.g. tool restart).
-- Only the host that holds the session (matching nonce echoed in ACKs) may drive
-  it; `SESSION_CLOSE` or the watchdog frees it.
+  state was lost (e.g. tool restart). It is answered in every phase.
+- Only the host that holds the session (matching nonce echoed in the data frame
+  after `SESSION_OPEN`) may drive it; `SESSION_CLOSE`, `ABORT` or the watchdog
+  frees it.
+- A data frame arriving with no open session is NACK'ed with `err=no session`;
+  a page that does not fit the remaining flash is NACK'ed with `err=flash`.
+  Flash errors are fatal to the session but never to the board (§8).
 
 ## 8. Error handling
 
@@ -209,16 +247,22 @@ planned for v1.
 
 ## 11. Mapping to embassy-boot-ch32
 
-- Bootloader: a new `transport-can` feature implementing the same internal
-  transport shape as the current serial transport, reusing
-  `BlockingFirmwareUpdater` from `embassy-boot` unchanged. Flash geometry and
-  partition maps stay as they are.
-- Runtime listener (for `PING` / `GET_INFO` / `ENTER_UPDATE`): analogous to the
-  existing `examples/application/src/usb_runtime.rs`, using
-  `ch32_hal::can::Can::new_blocking` (no executor needed).
-- Memory fit: bxCAN registers + minimal driver code are expected to fit the 16 KiB
-  serial bootloader maps; if not, a `-can` map variant with a 32 KiB bootloader
-  (like `-usb`) is the fallback. **To be verified during implementation.**
+- Bootloader: a `transport-can` feature (see
+  `examples/bootloader/src/can_update.rs`) reusing `BlockingFirmwareUpdater`
+  unchanged. Flash geometry and partition maps stay as they are.
+- Runtime listener (for `PING` / `GET_INFO` / `ENTER_UPDATE`, see
+  `examples/application/src/can_runtime.rs`): analogous to the existing
+  `examples/application/src/usb_runtime.rs`. Both sides use
+  `ch32_hal::can::Can::new_nb` (the non-blocking driver polled once per
+  millisecond): the blocking `receive()` would park on the embassy time driver,
+  which a bare bootloader cannot guarantee, and the application polls the bus
+  additively from its console loop.
+- Memory fit, as implemented: the CAN bootloader measures ≈ 14.3 KiB, which only
+  barely fits a 16 KiB partition and leaves no room to grow, so parts get a
+  `-can` map variant with a 32 KiB bootloader, the same approach as `-usb`:
+  `flash128k-ram32k-can.x`, `flash128k-ram64k-can.x` and
+  `flash256k-ram64k-can.x`. The runtime listener itself links into the active
+  partition, where there is room to spare.
 - Parts note: on CH32V305 CAN2 is the secondary bxCAN unit (master/slave pairing
   with CAN1, shared message RAM); v1 uses a single CAN controller per node, CAN1
   by default.
@@ -239,24 +283,23 @@ download-transfer-exit lifecycle, stop-and-wait flow control). However:
 If demand appears, a real UDS transport can be layered later; the framing choices
 here were made so that migration stays possible.
 
-## 13. Open questions
+## 13. Open questions (and how v1 resolved them)
 
-1. **NodeID provisioning:** compile-time constant only (simple, example-friendly)
-   vs. stored in flash with a `SET_NODEID` command (flexible, needs a settings
-   page and collision policy). Proposal: constant in v1, `SET_NODEID` later.
-2. **`ENTER_UPDATE` UID width:** the full 12-byte UID needs 2 frames (12 bytes
-   won't fit one classic CAN frame alongside the opcode). Options: two-frame
-   control message, a 7-byte UID prefix (collision probability negligible in
-   practice), or a 4-byte UID hash. Proposal: 7-byte prefix.
+1. **NodeID provisioning:** resolved as a compile-time constant
+   (`can::DEFAULT_NODE_ID`, a `const NODE_ID` in both example builds);
+   `SET_NODEID` stored in flash remains a possible later addition.
+2. **`ENTER_UPDATE` UID width:** resolved as the 7-byte UID prefix (fits one
+   frame with the opcode); the host additionally verifies the full 12-byte UID
+   from `GET_INFO` before flashing anything.
 3. **Base ID configurability** beyond the compile-time constant (e.g. 29-bit
-   extended addressing for shared buses) — probably YAGNI, but easy to add.
-4. **ACK-per-page granularity** (256 B): acceptable latency vs. ACK-per-frame for
-   simpler recovery? Proposal: page granularity; 32 frames per ACK is still a
-   small retry window and the offset check makes recovery trivial.
-5. **Security stub scope** in v1: reserve opcodes only, or implement a fixed-key
-   seed/key now? Proposal: reserve only.
-6. **`GET_INFO` response spacing:** a randomized delay is crude on a shared
-   1 Mbit bus; alternative is the host iterating NodeIDs it knows. Needs
-   measurement with a realistic node count.
+   extended addressing for shared buses) — still open, probably YAGNI; the codec
+   keeps the base ID in one place.
+4. **ACK-per-page granularity** (256 B): resolved as page granularity; see §6.3
+   for the recovery rule it implies for the host.
+5. **Security stub scope** in v1: resolved as reserve-only (§10).
+6. **`GET_INFO` response spacing:** implemented as a per-node delay derived from
+   the UID (`uid[11] % 16` ms), identical in the runtime listener and the
+   bootloader. Needs measurement with a realistic node count.
 7. Whether a **group/broadcast** update (identical image to all nodes, no ACKs,
-   host verifies afterwards via `GET_INFO`) is worth adding in v1.
+   host verifies afterwards via `GET_INFO`) is worth adding — still open; v1
+   ignores functional `ENTER_UPDATE` and only answers functional `GET_INFO`.
